@@ -109,15 +109,16 @@ internal static class Win
     /// Like <see cref="SetVisibleBounds"/>, but doesn't wait for the app to respond (used every frame
     /// while dragging/gliding live windows). Only resizes when the size really changes.
     /// </summary>
-    public static void SetVisibleBoundsAsync(IntPtr hwnd, Rectangle target)
+    public static void SetVisibleBoundsAsync(IntPtr hwnd, Rectangle target, bool force = false)
     {
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
         var outer = GetOuterBounds(hwnd);
         var visible = GetVisibleBounds(hwnd);
         int left = visible.Left - outer.Left, top = visible.Top - outer.Top;
         int right = outer.Right - visible.Right, bottom = outer.Bottom - visible.Bottom;
 
         uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_ASYNCWINDOWPOS;
-        if (Math.Abs(visible.Width - target.Width) < 2 && Math.Abs(visible.Height - target.Height) < 2)
+        if (!force && Math.Abs(visible.Width - target.Width) < 2 && Math.Abs(visible.Height - target.Height) < 2)
             flags |= Native.SWP_NOSIZE;
 
         Native.SetWindowPos(hwnd, IntPtr.Zero, target.X - left, target.Y - top,
@@ -228,23 +229,55 @@ internal static class Win
         }
 
         string name = "";
-        string? path = null;
-        try
+        string? path = QueryImagePath(pid);
+        if (path != null)
         {
-            using var p = Process.GetProcessById((int)pid);
-            name = p.ProcessName;
-            try { path = p.MainModule?.FileName; }
-            catch { /* elevated or protected process */ }
+            name = System.IO.Path.GetFileNameWithoutExtension(path);
         }
-        catch
+        else
         {
-            // Process already gone.
+            try
+            {
+                using var p = Process.GetProcessById((int)pid);
+                name = p.ProcessName;
+            }
+            catch
+            {
+                // Process already gone.
+            }
         }
 
         lock (ProcessCache)
         {
             if (ProcessCache.Count > 500) ProcessCache.Clear();
             return ProcessCache[pid] = (name, path);
+        }
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool QueryFullProcessImageName(IntPtr process, int flags, StringBuilder name, ref int size);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    /// <summary>The exe path of a process — quick, and works for most elevated apps too.</summary>
+    private static string? QueryImagePath(uint pid)
+    {
+        const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+        IntPtr h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (h == IntPtr.Zero) return null;
+        try
+        {
+            var sb = new StringBuilder(1024);
+            int size = sb.Capacity;
+            return QueryFullProcessImageName(h, 0, sb, ref size) ? sb.ToString(0, size) : null;
+        }
+        finally
+        {
+            CloseHandle(h);
         }
     }
 

@@ -113,6 +113,7 @@ internal sealed class TrayApp : ApplicationContext
 
         // ── Dock, taskbar, desktop icons ──
         _taskbarTimer.Tick += (_, _) => Taskbar.KeepHidden(); // Windows sometimes brings it back
+        KamiFiles.Zones = _zones;
         ApplyDockAndDesktop(null);
 
         // ── Wallpaper (after the taskbar change has settled, so the zones line up) ──
@@ -405,8 +406,11 @@ internal sealed class TrayApp : ApplicationContext
     /// <summary>Dock on/off, taskbar hidden or not, desktop icons hidden or not.</summary>
     private void ApplyDockAndDesktop(HorizonConfig? previous)
     {
-        if (_cfg.HideDesktopIcons) DesktopIcons.Hide();
-        else DesktopIcons.Show();
+        if (previous == null || previous.HideDesktopIcons != _cfg.HideDesktopIcons)
+        {
+            if (_cfg.HideDesktopIcons) DesktopIcons.Hide();
+            else DesktopIcons.Show();
+        }
 
         if (_cfg.ShowDock)
         {
@@ -430,7 +434,9 @@ internal sealed class TrayApp : ApplicationContext
         }
         else
         {
-            _dock?.Hide();
+            _dock?.Close();
+            _dock?.Dispose();
+            _dock = null;
             _zones.BottomReserve = 0;
         }
 
@@ -449,6 +455,12 @@ internal sealed class TrayApp : ApplicationContext
 
     private void OpenSettingsWindow()
     {
+        if (_settings is { IsDisposed: false } && _zones.IsTracked(_settings.Handle))
+        {
+            _zones.BringToFocus(_settings.Handle);
+            return;
+        }
+
         if (_settings is { IsDisposed: false })
         {
             if (_settings.WindowState == FormWindowState.Minimized) _settings.WindowState = FormWindowState.Normal;

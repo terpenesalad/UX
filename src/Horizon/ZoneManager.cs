@@ -63,6 +63,9 @@ internal sealed class ZoneManager
 
     public bool Paused { get; set; }
 
+    /// <summary>The window being dragged right now (it's left alone by everything else).</summary>
+    public IntPtr Dragging { get; set; }
+
     /// <summary>Space kept free at the bottom of the screen for the dock.</summary>
     public int BottomReserve { get; set; }
 
@@ -156,7 +159,16 @@ internal sealed class ZoneManager
         if (StashEdgeAt(cursor) is Side side)
         {
             ReportDrag(null, dropped: true);
-            Stash(t, side, screen, null, now);
+            Glide.Cancel(hwnd);
+            // Let the drag's last queued moves reach the app before tucking it away.
+            var wait = new System.Windows.Forms.Timer { Interval = 120 };
+            wait.Tick += (_, _) =>
+            {
+                wait.Stop();
+                wait.Dispose();
+                if (Native.IsWindow(hwnd)) Stash(t, side, screen, null, Win.GetVisibleBounds(hwnd));
+            };
+            wait.Start();
             return;
         }
 
@@ -179,10 +191,11 @@ internal sealed class ZoneManager
     /// <summary>After a window lands: make room around it, so windows sit side by side, not on top.</summary>
     private void Settle(IntPtr hwnd, Rectangle landed, Screen screen)
     {
-        if (!_cfg.AvoidOverlap || Paused) return;
+        if (!_cfg.AvoidOverlap || Paused || Dragging != IntPtr.Zero) return;
 
         foreach (var (other, to) in LayoutSolver.MakeRoom(hwnd, landed, screen, FullSizeOf, _cfg, BottomReserve))
         {
+            if (other == Dragging || IsStashed(other)) continue;
             var full = FullSizeOf(other);
             var from = Win.GetVisibleBounds(other);
             if (to.Width < full.Width * 0.97)
@@ -364,6 +377,7 @@ internal sealed class ZoneManager
     public void BringToFocus(IntPtr hwnd)
     {
         if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return;
+        Glide.Cancel(hwnd);
 
         _tracked.Remove(hwnd, out var t);
         var screen = t != null ? FindScreen(t.ScreenName) ?? Screen.FromHandle(hwnd) : Screen.FromHandle(hwnd);
@@ -416,6 +430,7 @@ internal sealed class ZoneManager
     private void Stash(TrackedWindow t, Side side, Screen screen, ThumbnailView? view, Rectangle viewRect)
     {
         var hwnd = t.Hwnd;
+        Glide.Cancel(hwnd);
         t.StashSide = side;
         t.ScreenName = screen.DeviceName;
         if (t.View != null && t.View != view) CloseView(t);
@@ -559,6 +574,7 @@ internal sealed class ZoneManager
     {
         foreach (var t in _tracked.Values.ToList())
         {
+            Glide.Cancel(t.Hwnd);
             CloseWidget(t);
             CloseView(t);
             if (!Native.IsWindow(t.Hwnd)) continue;

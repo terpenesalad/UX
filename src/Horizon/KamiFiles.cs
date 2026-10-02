@@ -35,8 +35,17 @@ internal sealed class KamiFiles : Form
         w.BringIn();
     }
 
+    /// <summary>Set by the app so Files can come back from the sides like any other window.</summary>
+    public static ZoneManager? Zones { get; set; }
+
     private void BringIn()
     {
+        if (Zones != null && Zones.IsTracked(Handle))
+        {
+            Zones.BringToFocus(Handle);
+            return;
+        }
+
         if (WindowState == FormWindowState.Minimized) WindowState = FormWindowState.Normal;
         Show();
         Win.ForceForeground(Handle);
@@ -64,6 +73,8 @@ internal sealed class KamiFiles : Form
     private bool _searchResults;
     private bool _bigIcons = true;
     private bool _renaming;
+    private Entry? _renameEntry; // the file being renamed (the list can change underneath the edit box)
+    private readonly Dictionary<string, Bitmap> _icons = new();
 
     private readonly ListBox _sidebar;
     private readonly List<Place> _places = new();
@@ -75,7 +86,7 @@ internal sealed class KamiFiles : Form
     private readonly Label _status;
     private readonly ImageList _images = new() { ImageSize = new Size(IconSize, IconSize), ColorDepth = ColorDepth.Depth32Bit };
     private readonly ImageList _rowHeight = new() { ImageSize = new Size(1, 28) };
-    private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 350 };
+    private readonly System.Windows.Forms.Timer _refresh = new() { Interval = 900 };
     private FileSystemWatcher? _watcher;
     private CancellationTokenSource? _work;
 
@@ -129,7 +140,11 @@ internal sealed class KamiFiles : Form
         _list.DrawSubItem += DrawSubItem;
         _list.DrawColumnHeader += DrawHeader;
         _list.ItemActivate += (_, _) => OpenSelected();
-        _list.BeforeLabelEdit += (_, _) => _renaming = true;
+        _list.BeforeLabelEdit += (_, e) =>
+        {
+            _renaming = true;
+            _renameEntry = e.Item >= 0 && e.Item < _list.Items.Count ? _list.Items[e.Item].Tag as Entry : null;
+        };
         _list.AfterLabelEdit += (s, e) =>
         {
             _renaming = false;
@@ -270,7 +285,8 @@ internal sealed class KamiFiles : Form
         {
             try
             {
-                if (!d.IsReady) continue;
+                // Network drives can take ages to answer when disconnected — keep the window snappy.
+                if (d.DriveType is not (DriveType.Fixed or DriveType.Removable) || !d.IsReady) continue;
                 string label = string.IsNullOrWhiteSpace(d.VolumeLabel) ? "Local Disk" : d.VolumeLabel;
                 _places.Add(new Place($"{label} ({d.Name.TrimEnd('\\')})", d.RootDirectory.FullName, ""));
             }
@@ -542,7 +558,7 @@ internal sealed class KamiFiles : Form
         var seen = new HashSet<string>();
         foreach (var e in entries)
         {
-            if (_images.Images.ContainsKey(e.IconKey) || !seen.Add(e.IconKey)) continue;
+            if (_icons.ContainsKey(e.IconKey) || !seen.Add(e.IconKey)) continue;
             bool thumb = !e.IsDir && Thumbnails.Contains(System.IO.Path.GetExtension(e.Path));
             wanted.Add((e.IconKey, e.Path, !thumb));
         }
@@ -558,15 +574,17 @@ internal sealed class KamiFiles : Form
                 if (bmp == null) continue;
                 try
                 {
+                    if (!IsHandleCreated || IsDisposed) { bmp.Dispose(); return; }
                     BeginInvoke(new Action(() =>
                     {
-                        if (IsDisposed || _images.Images.ContainsKey(key)) { bmp.Dispose(); return; }
-                        _images.Images.Add(key, bmp);
+                        if (IsDisposed || _icons.ContainsKey(key)) { bmp.Dispose(); return; }
+                        _icons[key] = bmp;
                         _list.Invalidate();
                     }));
                 }
-                catch (InvalidOperationException)
+                catch (Exception)
                 {
+                    bmp.Dispose();
                     return; // window closed
                 }
             }
@@ -584,13 +602,12 @@ internal sealed class KamiFiles : Form
         {
             _watcher = new FileSystemWatcher(path)
             {
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
+                NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName, // not every write: downloads would thrash
                 SynchronizingObject = this
             };
             FileSystemEventHandler changed = (_, _) => { _refresh.Stop(); _refresh.Start(); };
             _watcher.Created += changed;
             _watcher.Deleted += changed;
-            _watcher.Changed += changed;
             _watcher.Renamed += (_, _) => { _refresh.Stop(); _refresh.Start(); };
             _watcher.EnableRaisingEvents = true;
         }
@@ -625,6 +642,8 @@ internal sealed class KamiFiles : Form
     /// <summary>Searches everything inside the current folder (names only), in the background.</summary>
     private void DeepSearch(string query)
     {
+        query = new string(query.Where(c => Array.IndexOf(Path.GetInvalidFileNameChars(), c) < 0 && c != '*' && c != '?').ToArray()).Trim();
+        if (query.Length == 0 || query.Contains("..")) return;
         _work?.Cancel();
         var cts = _work = new CancellationTokenSource();
         string root = _current;
@@ -637,6 +656,7 @@ internal sealed class KamiFiles : Form
             {
                 RecurseSubdirectories = true,
                 IgnoreInaccessible = true,
+                MatchType = MatchType.Simple,
                 AttributesToSkip = FileAttributes.Hidden | FileAttributes.System
             };
             foreach (var p in Directory.EnumerateFileSystemEntries(root, "*" + query + "*", options))
@@ -659,7 +679,13 @@ internal sealed class KamiFiles : Form
             return found;
         }, cts.Token).ContinueWith(t =>
         {
-            if (cts.IsCancellationRequested || t.IsFaulted || IsDisposed) return;
+            if (cts.IsCancellationRequested || IsDisposed) return;
+            if (t.IsFaulted)
+            {
+                BeginInvoke(new Action(() => _status.Text = "Search failed: " + t.Exception?.GetBaseException().Message));
+                return;
+            }
+
             BeginInvoke(new Action(() =>
             {
                 _searchResults = true;
@@ -725,8 +751,39 @@ internal sealed class KamiFiles : Form
         if (move) Clipboard.Clear();
     }
 
-    /// <summary>Copies or moves with Windows' own progress and "replace or skip" dialogs.</summary>
+    /// <summary>
+    /// Copies or moves with Windows' own progress and "replace or skip" dialogs — on a background
+    /// thread, so a long copy never freezes the rest of KAMI UX.
+    /// </summary>
     private void Transfer(IEnumerable<string> sources, string destination, bool move)
+    {
+        var list = sources.ToList();
+        RunFileWork(() => TransferNow(list, destination, move));
+    }
+
+    /// <summary>Runs file work on its own STA thread (Windows' file dialogs need one), then refreshes.</summary>
+    private void RunFileWork(Action work)
+    {
+        var t = new Thread(() =>
+        {
+            try { work(); }
+            catch (Exception ex) { Log.Write("File operation failed: " + ex.Message); }
+
+            try
+            {
+                if (IsHandleCreated && !IsDisposed) BeginInvoke(new Action(() => Reload(keepSelection: true)));
+            }
+            catch (Exception)
+            {
+                // Window closed meanwhile.
+            }
+        })
+        { IsBackground = false, Name = "KAMI Files operation" };
+        t.SetApartmentState(ApartmentState.STA);
+        t.Start();
+    }
+
+    private static void TransferNow(List<string> sources, string destination, bool move)
     {
         foreach (var src in sources)
         {
@@ -755,22 +812,27 @@ internal sealed class KamiFiles : Form
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(ex.Message, "Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
-
-        Reload(keepSelection: true);
     }
 
     private void RecycleSelected()
     {
         var paths = SelectedPaths().ToList();
+        if (paths.Count > 0) RunFileWork(() => RecycleNow(paths));
+    }
+
+    private static void RecycleNow(List<string> paths)
+    {
         foreach (var p in paths)
         {
             try
             {
-                if (Directory.Exists(p)) FileSystem.DeleteDirectory(p, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
-                else FileSystem.DeleteFile(p, UIOption.OnlyErrorDialogs, RecycleOption.SendToRecycleBin);
+                // AllDialogs: if something can't go to the Recycle Bin (USB/network drives),
+                // Windows asks before deleting it for good.
+                if (Directory.Exists(p)) FileSystem.DeleteDirectory(p, UIOption.AllDialogs, RecycleOption.SendToRecycleBin);
+                else FileSystem.DeleteFile(p, UIOption.AllDialogs, RecycleOption.SendToRecycleBin);
             }
             catch (OperationCanceledException)
             {
@@ -778,11 +840,9 @@ internal sealed class KamiFiles : Form
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, ex.Message, "Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(ex.Message, "Files", MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
-
-        Reload(keepSelection: false);
     }
 
     private void NewFolder()
@@ -817,8 +877,9 @@ internal sealed class KamiFiles : Form
 
     private void Rename(object? sender, LabelEditEventArgs e)
     {
-        if (e.Label == null || e.Item < 0) return; // edit cancelled
-        var entry = (Entry)_list.Items[e.Item].Tag!;
+        var entry = _renameEntry;
+        _renameEntry = null;
+        if (e.Label == null || entry == null) return; // edit cancelled
         string newName = e.Label.Trim();
         if (newName.Length == 0 || newName == entry.Name || newName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
         {
@@ -911,7 +972,23 @@ internal sealed class KamiFiles : Form
     private void DropOnList(object? sender, DragEventArgs e)
     {
         if (e.Data?.GetData(DataFormats.FileDrop) is not string[] files) return;
-        Transfer(files, DropTarget(e), e.Effect == DragDropEffects.Move);
+        string target = DropTarget(e);
+        bool move = e.Effect == DragDropEffects.Move;
+
+        // Never into itself or its own subfolder, and never "move" to where it already is.
+        string Norm(string p) => Path.TrimEndingDirectorySeparator(Path.GetFullPath(p));
+        var valid = files.Where(f =>
+        {
+            string src = Norm(f), dest = Norm(target);
+            bool intoSelf = dest.Equals(src, StringComparison.OrdinalIgnoreCase) ||
+                            dest.StartsWith(src + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
+            bool alreadyThere = string.Equals(Path.GetDirectoryName(src), dest, StringComparison.OrdinalIgnoreCase);
+            return !intoSelf && !(move && alreadyThere);
+        }).ToList();
+
+        e.Effect = DragDropEffects.None; // we do the move ourselves; the source must not also delete
+        if (valid.Count == 0) return;
+        BeginInvoke(new Action(() => Transfer(valid, target, move)));
     }
 
     /// <summary>Dropping onto a folder puts things inside it; anywhere else means here.</summary>
@@ -996,7 +1073,7 @@ internal sealed class KamiFiles : Form
             g.FillPath(sel, path);
         }
 
-        var icon = _images.Images.ContainsKey(entry.IconKey) ? _images.Images[entry.IconKey] : null;
+        _icons.TryGetValue(entry.IconKey, out var icon);
         var iconRect = new Rectangle(r.X + (r.Width - IconSize) / 2, r.Y + 8, IconSize, IconSize);
         if (icon != null) g.DrawImage(icon, iconRect);
 
@@ -1016,7 +1093,7 @@ internal sealed class KamiFiles : Form
 
         if (e.ColumnIndex == 0)
         {
-            var icon = _images.Images.ContainsKey(entry.IconKey) ? _images.Images[entry.IconKey] : null;
+            _icons.TryGetValue(entry.IconKey, out var icon);
             if (icon != null) g.DrawImage(icon, new Rectangle(r.X + 10, r.Y + (r.Height - ListIcon) / 2, ListIcon, ListIcon));
             TextRenderer.DrawText(g, entry.Name, _list.Font, new Rectangle(r.X + 38, r.Y, r.Width - 40, r.Height), Kami.Text,
                 TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.EndEllipsis);
@@ -1064,6 +1141,8 @@ internal sealed class KamiFiles : Form
         _work?.Cancel();
         _watcher?.Dispose();
         _refresh.Dispose();
+        foreach (var b in _icons.Values) b.Dispose();
+        _icons.Clear();
         base.OnFormClosed(e);
     }
 }

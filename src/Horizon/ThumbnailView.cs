@@ -171,13 +171,19 @@ internal static class Glide
     /// Glides the real window itself (no stand-in), so it stays live the whole way — video keeps
     /// playing. Moves are asynchronous so a slow app can never stall KAMI UX.
     /// </summary>
+    /// <summary>Stops any glide running on this window (e.g. you grabbed it mid-glide).</summary>
+    public static void Cancel(IntPtr hwnd)
+    {
+        if (!Running.Remove(hwnd, out var old)) return;
+        old.Stop();
+        old.Dispose();
+    }
+
+    public static bool IsGliding(IntPtr hwnd) => Running.ContainsKey(hwnd);
+
     public static void MoveReal(IntPtr hwnd, Rectangle from, Rectangle to, bool activate, Action? done = null)
     {
-        if (Running.Remove(hwnd, out var old))
-        {
-            old.Stop();
-            old.Dispose();
-        }
+        Cancel(hwnd);
 
         if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
         if (activate) Win.ForceForeground(hwnd);
@@ -187,8 +193,9 @@ internal static class Glide
         Running[hwnd] = timer;
         timer.Tick += (_, _) =>
         {
-            if (!Native.IsWindow(hwnd))
+            if (!Native.IsWindow(hwnd) || Native.IsIconic(hwnd))
             {
+                // Closed or minimised mid-glide: stop, and don't restore it by "landing".
                 timer.Stop();
                 Running.Remove(hwnd);
                 timer.Dispose();
@@ -202,7 +209,9 @@ internal static class Glide
             timer.Stop();
             Running.Remove(hwnd);
             timer.Dispose();
-            Win.SetVisibleBounds(hwnd, to); // land exactly
+            // Land exactly — queued like the steps before it, so it really is the last move
+            // (and a frozen app can't freeze KAMI UX).
+            Win.SetVisibleBoundsAsync(hwnd, to, force: true);
             done?.Invoke();
         };
         timer.Start();

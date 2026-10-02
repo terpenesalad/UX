@@ -19,6 +19,9 @@ internal sealed class DragController : IDisposable
     private readonly Control _ui = new();
     private readonly System.Windows.Forms.Timer _frame = new() { Interval = 15 };
     private readonly Thread _hookThread;
+    private readonly System.Windows.Forms.Timer _watchdog = new() { Interval = 2000 };
+    private Control? _hookUi;
+    private Point _watchdogCursor;
     private Native.LowLevelMouseProc? _proc; // must stay referenced while hooked
     private IntPtr _hook;
     private uint _hookThreadId;
@@ -44,6 +47,8 @@ internal sealed class DragController : IDisposable
     private ThumbnailView? _view;     // Miniature mode: the preview that moves instead of the window
     private bool _live;               // Live mode: the real window itself moves and resizes
     private Size _lastLiveSize;
+    private Rectangle _lastRequested;
+    private long _lastPosted;
     private long _lastLiveResize;
     private Rectangle _viewRect;
 
@@ -58,6 +63,8 @@ internal sealed class DragController : IDisposable
         _zones = zones;
         _ = _ui.Handle; // create it now so the hook thread can post to the UI thread
         _frame.Tick += (_, _) => Frame();
+        _watchdog.Tick += (_, _) => CheckHookAlive();
+        _watchdog.Start();
 
         _hookThread = new Thread(HookThreadMain) { IsBackground = true, Name = "KAMI UX mouse hook" };
         _hookThread.SetApartmentState(ApartmentState.STA);
@@ -79,16 +86,47 @@ internal sealed class DragController : IDisposable
     private void HookThreadMain()
     {
         _hookThreadId = Native.GetCurrentThreadId();
+        _hookUi = new Control();
+        _ = _hookUi.Handle; // lets the UI thread ask this thread to reinstall the hook
         _proc = HookProc;
         _hook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _proc, Native.GetModuleHandle(null), 0);
-        if (_hook == IntPtr.Zero)
-        {
-            Log.Write("Mouse hook failed: " + Marshal.GetLastWin32Error());
-            return;
-        }
+        if (_hook == IntPtr.Zero) Log.Write("Mouse hook failed: " + Marshal.GetLastWin32Error());
 
         Application.Run(); // message loop for this thread; ends on WM_QUIT
-        Native.UnhookWindowsHookEx(_hook);
+        if (_hook != IntPtr.Zero) Native.UnhookWindowsHookEx(_hook);
+        _hookUi.Dispose();
+    }
+
+    /// <summary>
+    /// Windows quietly removes a mouse hook it thinks is too slow. If the pointer is moving but
+    /// we've heard nothing for a while, put the hook back so dragging keeps working.
+    /// </summary>
+    private void CheckHookAlive()
+    {
+        if (!Native.GetCursorPos(out var p)) return;
+        var now = new Point(p.X, p.Y);
+        bool moved = now != _watchdogCursor;
+        _watchdogCursor = now;
+        if (!moved || Environment.TickCount64 - Interlocked.Read(ref _lastHookTick) < 1500) return;
+
+        var ui = _hookUi;
+        if (ui == null || !ui.IsHandleCreated) return;
+        Log.Write("Mouse hook stopped responding; reinstalling it.");
+        try
+        {
+            ui.BeginInvoke(new Action(() =>
+            {
+                if (_hook != IntPtr.Zero) Native.UnhookWindowsHookEx(_hook);
+                _hookState = HookState.Idle;
+                _buttonHeld = false;
+                _hook = Native.SetWindowsHookEx(Native.WH_MOUSE_LL, _proc!, Native.GetModuleHandle(null), 0);
+                Interlocked.Exchange(ref _lastHookTick, Environment.TickCount64);
+            }));
+        }
+        catch (InvalidOperationException)
+        {
+            // Hook thread is shutting down.
+        }
     }
 
     private IntPtr HookProc(int nCode, IntPtr wParam, IntPtr lParam)
@@ -197,7 +235,9 @@ internal sealed class DragController : IDisposable
     {
         if (_dragging || !Native.IsWindow(target)) return;
 
+        Glide.Cancel(target); // grabbed mid-glide: you're in charge now
         _target = target;
+        _zones.Dragging = target;
         _before = Win.GetVisibleBounds(target);
         _full = _zones.FullSizeOf(target);
         _grab = new PointF(
@@ -213,6 +253,8 @@ internal sealed class DragController : IDisposable
             Win.ForceForeground(target);
             _lastLiveSize = _before.Size;
             _lastLiveResize = 0;
+            _lastRequested = _before;
+            _lastPosted = 0;
         }
         else
         {
@@ -296,6 +338,15 @@ internal sealed class DragController : IDisposable
 
         // Keep the grabbed point under the pointer at whatever size the window currently is.
         var shown = Depth.ScaledAround(_lastLiveSize, 1.0, Cursor, _grab);
+
+        // Don't queue a new move until the app has caught up with the last one (or a moment has
+        // passed): a slow app would otherwise apply a backlog of stale moves after you let go.
+        var actual = Win.GetVisibleBounds(_target);
+        bool caughtUp = Math.Abs(actual.X - _lastRequested.X) <= 2 && Math.Abs(actual.Y - _lastRequested.Y) <= 2;
+        if (!caughtUp && now - _lastPosted < 50) return;
+
+        _lastRequested = shown;
+        _lastPosted = now;
         Win.SetVisibleBoundsAsync(_target, shown);
     }
 
@@ -304,6 +355,7 @@ internal sealed class DragController : IDisposable
         if (!_dragging || (!_live && _view == null)) return;
         _frame.Stop();
         _dragging = false;
+        _zones.Dragging = IntPtr.Zero;
 
         var cursor = Cursor;
         var wa = Screen.FromPoint(cursor).WorkingArea;
@@ -334,6 +386,7 @@ internal sealed class DragController : IDisposable
         if (!_dragging || (!_live && _view == null)) return;
         _frame.Stop();
         _dragging = false;
+        _zones.Dragging = IntPtr.Zero;
 
         var view = _view;
         _view = null;
@@ -347,6 +400,7 @@ internal sealed class DragController : IDisposable
     {
         Cancel();
         _frame.Dispose();
+        _watchdog.Dispose();
         if (_hookThreadId != 0) Native.PostThreadMessage(_hookThreadId, Native.WM_QUIT, IntPtr.Zero, IntPtr.Zero);
         _hookThread.Join(500);
         _ui.Dispose();
