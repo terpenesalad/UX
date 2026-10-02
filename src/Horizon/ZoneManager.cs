@@ -1,3 +1,5 @@
+using System.Runtime.InteropServices;
+
 namespace Horizon;
 
 internal enum Side { Left, Right }
@@ -17,23 +19,37 @@ internal readonly record struct ZoneLayout(Rectangle Left, Rectangle Focus, Rect
     }
 }
 
-/// <summary>A window Horizon has parked or stashed, plus where it was before.</summary>
+/// <summary>A window Horizon has shrunk into the periphery or stashed, plus how to put it back.</summary>
 internal sealed class TrackedWindow
 {
     public required IntPtr Hwnd { get; init; }
-    public required Rectangle Original { get; set; }
+
+    /// <summary>The window's size when it's in focus (scale 1).</summary>
+    public required Size FullSize { get; set; }
+
+    /// <summary>Where it was before Horizon first touched it (used on exit).</summary>
+    public required Rectangle Original { get; init; }
+
     public required string ScreenName { get; set; }
-    public Side? ParkedSide { get; set; }
-    public Side StashSide { get; set; }
+
     public StashWidget? Widget { get; set; }
+    public Side StashSide { get; set; }
+    public Rectangle StashOuter { get; set; }
+    public Rectangle StashVisible { get; set; }
     public long Order { get; set; }
+
+    public bool IsStashed => Widget != null;
+
+    /// <summary>True once the real window has actually been minimised (after the tuck-away animation).</summary>
+    public bool Tucked { get; set; }
 }
 
 /// <summary>
-/// The core behaviour:
-///  • drop a window in a side zone  → it is "parked": shrunk and stacked in that column, still live;
-///  • drop it at the very edge      → it is "stashed": minimised and replaced by a tiny widget;
-///  • drop a parked window in focus → it gets its original size back, centred in the focus zone.
+/// Where windows go:
+///  • anywhere in the focus zone → full size;
+///  • in the periphery → smaller the further out it sits (see <see cref="Depth"/>), still live;
+///  • dropped at the very edge → stashed into a little widget;
+///  • click the widget / dock icon, or Win+Alt+↑ → glides back to full size in focus.
 /// </summary>
 internal sealed class ZoneManager
 {
@@ -43,85 +59,295 @@ internal sealed class ZoneManager
 
     public bool Paused { get; set; }
 
+    /// <summary>Space kept free at the bottom of the screen for the dock.</summary>
+    public int BottomReserve { get; set; }
+
     public ZoneManager(HorizonConfig cfg) => _cfg = cfg;
 
     public void UpdateConfig(HorizonConfig cfg)
     {
         _cfg = cfg;
-        RelayoutEverything();
+        LayoutWidgets();
     }
 
-    // ── Entry points ─────────────────────────────────────────────────────────
+    public HorizonConfig Config => _cfg;
 
-    /// <summary>Called when the user finishes dragging <paramref name="hwnd"/>.</summary>
-    public void HandleDrop(IntPtr hwnd, Point cursor, Rectangle boundsBeforeDrag)
+    public bool IsTracked(IntPtr hwnd) => _tracked.ContainsKey(hwnd);
+
+    public bool IsStashed(IntPtr hwnd) => _tracked.TryGetValue(hwnd, out var t) && t.IsStashed;
+
+    /// <summary>The size this window has when it's in focus.</summary>
+    public Size FullSizeOf(IntPtr hwnd) =>
+        _tracked.TryGetValue(hwnd, out var t) ? t.FullSize : Win.GetVisibleBounds(hwnd).Size;
+
+    /// <summary>Which edge (if any) a drop at <paramref name="cursor"/> would stash to.</summary>
+    public Side? StashEdgeAt(Point cursor)
+    {
+        var wa = Screen.FromPoint(cursor).WorkingArea;
+        if (cursor.X <= wa.Left + _cfg.StashEdgePixels) return Side.Left;
+        if (cursor.X >= wa.Right - 1 - _cfg.StashEdgePixels) return Side.Right;
+        return null;
+    }
+
+    // ── Results of a drag ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Called when a fluid drag ends. The real window is off-screen and <paramref name="view"/>
+    /// (its live preview) sits at <paramref name="viewRect"/>.
+    /// </summary>
+    public void CompleteDrag(IntPtr hwnd, Point cursor, Rectangle viewRect, Size fullSize, Rectangle before, ThumbnailView view)
+    {
+        var screen = Screen.FromPoint(cursor);
+        var t = Track(hwnd, screen, fullSize, before);
+
+        if (StashEdgeAt(cursor) is Side side)
+        {
+            Stash(t, side, screen, view, viewRect);
+            return;
+        }
+
+        CloseWidget(t);
+        var target = Depth.Clamp(viewRect, screen.WorkingArea);
+        Glide.Land(hwnd, target, activate: true, view);
+        ForgetIfFullSize(t, target);
+    }
+
+    /// <summary>For drags Windows handled itself (e.g. maximised windows, keyboard moves).</summary>
+    public void HandleSystemDrop(IntPtr hwnd, Point cursor, Rectangle before)
     {
         if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
 
         var screen = Screen.FromPoint(cursor);
-        var wa = screen.WorkingArea;
+        var t = Track(hwnd, screen, FullSizeOf(hwnd), before);
 
-        if (cursor.X <= wa.Left + _cfg.StashEdgePixels)
+        if (StashEdgeAt(cursor) is Side side)
         {
-            Stash(hwnd, Side.Left, screen, boundsBeforeDrag);
+            Stash(t, side, screen, null, Win.GetVisibleBounds(hwnd));
             return;
         }
 
-        if (cursor.X >= wa.Right - 1 - _cfg.StashEdgePixels)
-        {
-            Stash(hwnd, Side.Right, screen, boundsBeforeDrag);
-            return;
-        }
+        var now = Win.GetVisibleBounds(hwnd);
+        var anchor = new Point(cursor.X, cursor.Y);
+        var fraction = new PointF(
+            Math.Clamp((cursor.X - now.Left) / (float)Math.Max(1, now.Width), 0, 1),
+            Math.Clamp((cursor.Y - now.Top) / (float)Math.Max(1, now.Height), 0, 1));
+        double scale = Depth.Scale(cursor.X, screen.WorkingArea, _cfg);
+        var target = Depth.Clamp(Depth.ScaledAround(t.FullSize, scale, anchor, fraction), screen.WorkingArea);
 
-        var zones = ZoneLayout.For(wa, _cfg.FocusWidthRatio);
-        if (zones.Left.Contains(cursor)) Park(hwnd, Side.Left, screen, boundsBeforeDrag);
-        else if (zones.Right.Contains(cursor)) Park(hwnd, Side.Right, screen, boundsBeforeDrag);
-        else if (_tracked.ContainsKey(hwnd)) BringToFocus(hwnd);
+        Glide.Move(hwnd, target, activate: true, _cfg);
+        ForgetIfFullSize(t, target);
     }
+
+    // ── Shortcuts ────────────────────────────────────────────────────────────
 
     public void ParkForeground(Side side)
     {
         var hwnd = Native.GetForegroundWindow();
         if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
-        Park(hwnd, side, Screen.FromHandle(hwnd), Win.GetVisibleBounds(hwnd));
+
+        var screen = Screen.FromHandle(hwnd);
+        var wa = screen.WorkingArea;
+        var zones = ZoneLayout.For(wa, _cfg.FocusWidthRatio);
+        var column = side == Side.Left ? zones.Left : zones.Right;
+
+        var now = Win.GetVisibleBounds(hwnd);
+        var t = Track(hwnd, screen, FullSizeOf(hwnd), now);
+        int cx = column.Left + column.Width / 2;
+        double scale = Depth.Scale(cx, wa, _cfg);
+        var target = Depth.ScaledAround(t.FullSize, scale, new Point(cx, now.Top + now.Height / 2), new PointF(0.5f, 0.5f));
+        Glide.Move(hwnd, Depth.Clamp(target, wa), activate: false, _cfg);
     }
 
     public void StashForeground(Side side)
     {
         var hwnd = Native.GetForegroundWindow();
         if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
-        Stash(hwnd, side, Screen.FromHandle(hwnd), Win.GetVisibleBounds(hwnd));
+
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+        var screen = Screen.FromHandle(hwnd);
+        var now = Win.GetVisibleBounds(hwnd);
+        var t = Track(hwnd, screen, FullSizeOf(hwnd), now);
+        Stash(t, side, screen, null, now);
     }
 
-    public void FocusForeground()
-    {
-        var hwnd = Native.GetForegroundWindow();
-        if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
+    public void FocusForeground() => BringToFocus(Native.GetForegroundWindow());
 
-        if (_tracked.ContainsKey(hwnd))
+    // ── Focus / stash ────────────────────────────────────────────────────────
+
+    /// <summary>Brings a window back to full size in the focus zone (gliding or un-minimising).</summary>
+    public void BringToFocus(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero || !Native.IsWindow(hwnd)) return;
+
+        _tracked.Remove(hwnd, out var t);
+        var screen = t != null ? FindScreen(t.ScreenName) ?? Screen.FromHandle(hwnd) : Screen.FromHandle(hwnd);
+        var full = t?.FullSize ?? Win.GetVisibleBounds(hwnd).Size;
+
+        if (t is { IsStashed: true })
         {
-            BringToFocus(hwnd);
+            CloseWidget(t);
+            LayoutWidgets();
+            Unstash(t, FocusRect(screen, full, null));
             return;
         }
 
-        // Not parked: just centre it in the focus zone of its monitor.
-        var screen = Screen.FromHandle(hwnd);
-        var zones = ZoneLayout.For(screen.WorkingArea, _cfg.FocusWidthRatio);
-        var b = Win.GetVisibleBounds(hwnd);
-        int w = Math.Min(b.Width, zones.Focus.Width - 2 * _cfg.Margin);
-        int h = Math.Min(b.Height, zones.Focus.Height - 2 * _cfg.Margin);
-        Win.SetVisibleBounds(hwnd, new Rectangle(
-            zones.Focus.Left + (zones.Focus.Width - w) / 2,
-            zones.Focus.Top + (zones.Focus.Height - h) / 2, w, h));
+        if (Native.IsIconic(hwnd))
+        {
+            Win.ForceForeground(hwnd);
+            return;
+        }
+
+        var now = Win.GetVisibleBounds(hwnd);
+        Glide.Move(hwnd, FocusRect(screen, full, now.Top + now.Height / 2), activate: true, _cfg);
     }
 
-    // ── Park / focus / stash ─────────────────────────────────────────────────
+    /// <summary>Full size, centred in the focus zone, kept clear of the dock.</summary>
+    private Rectangle FocusRect(Screen screen, Size full, int? centreY)
+    {
+        var wa = screen.WorkingArea;
+        var zones = ZoneLayout.For(wa, _cfg.FocusWidthRatio);
+        int m = _cfg.Margin;
+        int usableBottom = wa.Bottom - BottomReserve;
 
-    private TrackedWindow Track(IntPtr hwnd, Screen screen, Rectangle originalBounds)
+        int w = Math.Min(full.Width, wa.Width - 2 * m);
+        int h = Math.Min(full.Height, usableBottom - wa.Top - 2 * m);
+        int x = zones.Focus.Left + (zones.Focus.Width - w) / 2;
+        int cy = centreY ?? wa.Top + (usableBottom - wa.Top) / 2;
+        int y = Math.Clamp(cy - h / 2, wa.Top + m, Math.Max(wa.Top + m, usableBottom - m - h));
+        return new Rectangle(Math.Max(wa.Left, x), y, w, h);
+    }
+
+    private void Stash(TrackedWindow t, Side side, Screen screen, ThumbnailView? view, Rectangle viewRect)
+    {
+        var hwnd = t.Hwnd;
+        t.StashSide = side;
+        t.ScreenName = screen.DeviceName;
+
+        if (t.Widget == null)
+        {
+            string app = Win.FriendlyAppName(hwnd);
+            string process = Win.ProcessName(hwnd);
+            bool isMedia = _cfg.MediaApps.Any(m => process.Contains(m, StringComparison.OrdinalIgnoreCase));
+            t.Widget = new StashWidget(app, Win.Title(hwnd), Win.AppIcon(hwnd, 48), isMedia);
+            t.Widget.RestoreRequested += () => BringToFocus(hwnd);
+        }
+
+        LayoutWidgets();
+        var widget = t.Widget;
+
+        if (view == null)
+        {
+            MinimiseWithFocusRestore(t, screen);
+            widget.Show();
+            return;
+        }
+
+        // Shrink the live preview into the widget, then tuck the real window away.
+        var to = widget.Bounds;
+        var started = Environment.TickCount64;
+        var timer = new System.Windows.Forms.Timer { Interval = 15 };
+        timer.Tick += (_, _) =>
+        {
+            double k = Math.Min(1, (Environment.TickCount64 - started) / 220.0);
+            view.Place(Glide.Lerp(viewRect, to, Depth.EaseOutCubic(k)));
+            if (k < 1) return;
+
+            timer.Stop();
+            timer.Dispose();
+            if (Native.IsWindow(hwnd)) MinimiseWithFocusRestore(t, screen);
+            if (!widget.IsDisposed) widget.Show();
+            view.Close();
+            view.Dispose();
+        };
+        timer.Start();
+    }
+
+    /// <summary>
+    /// Minimises a window and, in the same step, sets where it will come back: full size in the
+    /// focus zone. So even restoring it from the taskbar or Alt+Tab lands it somewhere sensible
+    /// (never off-screen after a drag).
+    /// </summary>
+    private void MinimiseWithFocusRestore(TrackedWindow t, Screen screen)
+    {
+        var hwnd = t.Hwnd;
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+
+        var outerNow = Win.GetOuterBounds(hwnd);
+        var visibleNow = Win.GetVisibleBounds(hwnd);
+        var visible = FocusRect(screen, t.FullSize, null);
+        var outer = Rectangle.FromLTRB(
+            visible.Left - (visibleNow.Left - outerNow.Left),
+            visible.Top - (visibleNow.Top - outerNow.Top),
+            visible.Right + (outerNow.Right - visibleNow.Right),
+            visible.Bottom + (outerNow.Bottom - visibleNow.Bottom));
+
+        var pl = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+        if (Native.GetWindowPlacement(hwnd, ref pl))
+        {
+            // Placement uses "workspace" coordinates: screen coordinates minus the taskbar's
+            // offset on that monitor. (Measured from the monitor, so snapped windows are fine too.)
+            var (dx, dy) = WorkspaceOffset(screen);
+            var normal = outer;
+            normal.Offset(dx, dy);
+
+            pl.rcNormalPosition = Native.RECT.From(normal);
+            pl.showCmd = Native.SW_SHOWMINNOACTIVE;
+            pl.flags = 0;
+            Native.SetWindowPlacement(hwnd, ref pl);
+        }
+        else
+        {
+            Native.ShowWindow(hwnd, Native.SW_MINIMIZE);
+        }
+
+        t.StashOuter = outer;
+        t.StashVisible = visible;
+        t.Tucked = true;
+    }
+
+    /// <summary>
+    /// Restores a minimised window straight into <paramref name="target"/> so Windows'
+    /// own restore animation flies it there.
+    /// </summary>
+    private static void Unstash(TrackedWindow t, Rectangle target)
+    {
+        var hwnd = t.Hwnd;
+        var pl = new Native.WINDOWPLACEMENT { length = Marshal.SizeOf<Native.WINDOWPLACEMENT>() };
+
+        if (Native.IsIconic(hwnd) && Native.GetWindowPlacement(hwnd, ref pl))
+        {
+            var (dx, dy) = WorkspaceOffset(Screen.FromRectangle(target));
+            int insetL = t.StashVisible.Left - t.StashOuter.Left, insetT = t.StashVisible.Top - t.StashOuter.Top;
+            int insetR = t.StashOuter.Right - t.StashVisible.Right, insetB = t.StashOuter.Bottom - t.StashVisible.Bottom;
+
+            var outer = Rectangle.FromLTRB(target.Left - insetL, target.Top - insetT,
+                target.Right + insetR, target.Bottom + insetB);
+            outer.Offset(dx, dy);
+
+            pl.rcNormalPosition = Native.RECT.From(outer);
+            pl.showCmd = Native.SW_RESTORE;
+            pl.flags = 0;
+            Native.SetWindowPlacement(hwnd, ref pl);
+        }
+        else
+        {
+            Win.SetVisibleBounds(hwnd, target);
+        }
+
+        Win.ForceForeground(hwnd);
+    }
+
+    /// <summary>Screen → workspace coordinates: subtract the space a top/left taskbar takes.</summary>
+    private static (int Dx, int Dy) WorkspaceOffset(Screen screen) =>
+        (screen.Bounds.Left - screen.WorkingArea.Left, screen.Bounds.Top - screen.WorkingArea.Top);
+
+    // ── Bookkeeping ──────────────────────────────────────────────────────────
+
+    private TrackedWindow Track(IntPtr hwnd, Screen screen, Size fullSize, Rectangle original)
     {
         if (!_tracked.TryGetValue(hwnd, out var t))
         {
-            t = new TrackedWindow { Hwnd = hwnd, Original = originalBounds, ScreenName = screen.DeviceName };
+            t = new TrackedWindow { Hwnd = hwnd, FullSize = fullSize, Original = original, ScreenName = screen.DeviceName };
             _tracked[hwnd] = t;
         }
 
@@ -130,77 +356,13 @@ internal sealed class ZoneManager
         return t;
     }
 
-    private void Park(IntPtr hwnd, Side side, Screen screen, Rectangle originalBounds)
+    private void ForgetIfFullSize(TrackedWindow t, Rectangle placed)
     {
-        var t = Track(hwnd, screen, originalBounds);
-        var previousSide = t.ParkedSide;
-
-        CloseWidget(t);
-        t.ParkedSide = side;
-
-        LayoutParked(screen, side);
-        if (previousSide.HasValue && previousSide != side) LayoutParked(screen, previousSide.Value);
+        if (t.IsStashed) return;
+        if (placed.Width >= t.FullSize.Width * 0.97) _tracked.Remove(t.Hwnd);
     }
 
-    private void Stash(IntPtr hwnd, Side side, Screen screen, Rectangle originalBounds)
-    {
-        var t = Track(hwnd, screen, originalBounds);
-        var previousSide = t.ParkedSide;
-        t.ParkedSide = null;
-        t.StashSide = side;
-
-        if (t.Widget == null)
-        {
-            string app = Win.FriendlyAppName(hwnd);
-            string process = Win.ProcessName(hwnd);
-            bool isMedia = _cfg.MediaApps.Any(m => process.Contains(m, StringComparison.OrdinalIgnoreCase));
-
-            t.Widget = new StashWidget(app, Win.Title(hwnd), Win.AppIcon(hwnd), isMedia);
-            t.Widget.RestoreRequested += () => BringToFocus(hwnd);
-        }
-
-        Native.ShowWindow(hwnd, Native.SW_MINIMIZE);
-        LayoutWidgets();
-        t.Widget.Show();
-
-        if (previousSide.HasValue) LayoutParked(screen, previousSide.Value);
-    }
-
-    public void BringToFocus(IntPtr hwnd)
-    {
-        if (!_tracked.Remove(hwnd, out var t))
-        {
-            Win.Activate(hwnd);
-            return;
-        }
-
-        bool wasStashed = t.Widget != null;
-        CloseWidget(t);
-
-        if (!Native.IsWindow(hwnd))
-        {
-            if (wasStashed) LayoutWidgets();
-            return;
-        }
-
-        var screen = FindScreen(t.ScreenName) ?? Screen.FromHandle(hwnd);
-        var wa = screen.WorkingArea;
-        var zones = ZoneLayout.For(wa, _cfg.FocusWidthRatio);
-        int m = _cfg.Margin;
-
-        int w = Math.Min(t.Original.Width, zones.Focus.Width - 2 * m);
-        int h = Math.Min(t.Original.Height, wa.Height - 2 * m);
-        int x = zones.Focus.Left + (zones.Focus.Width - w) / 2;
-        int y = Math.Clamp(t.Original.Top, wa.Top + m, Math.Max(wa.Top + m, wa.Bottom - m - h));
-
-        Win.SetVisibleBounds(hwnd, new Rectangle(x, y, w, h));
-        Win.Activate(hwnd);
-
-        if (t.ParkedSide.HasValue) LayoutParked(screen, t.ParkedSide.Value);
-        if (wasStashed) LayoutWidgets();
-    }
-
-    /// <summary>Puts every parked/stashed window back exactly where it started.</summary>
+    /// <summary>Puts every shrunk or stashed window back exactly where it started.</summary>
     public void RestoreAll()
     {
         foreach (var t in _tracked.Values.ToList())
@@ -211,78 +373,40 @@ internal sealed class ZoneManager
         }
 
         _tracked.Clear();
+        Win.RescueOffscreen(_cfg);
     }
 
-    /// <summary>Drops windows that were closed, or un-minimised by the user from the taskbar.</summary>
+    /// <summary>Forgets windows that closed, were maximised, or were un-minimised from the taskbar.</summary>
     public void Prune()
     {
-        bool changedWidgets = false;
-        var changedColumns = new HashSet<(string, Side)>();
-
+        bool changed = false;
         foreach (var t in _tracked.Values.ToList())
         {
             bool gone = !Native.IsWindow(t.Hwnd);
-            bool unstashedByUser = t.Widget != null && !gone &&
-                                   !Native.IsIconic(t.Hwnd) && Native.IsWindowVisible(t.Hwnd);
-            if (!gone && !unstashedByUser) continue;
+            bool restoredByUser = t.IsStashed && t.Tucked && !gone &&
+                                  !Native.IsIconic(t.Hwnd) && Native.IsWindowVisible(t.Hwnd);
+            bool maximised = !t.IsStashed && !gone && Native.IsZoomed(t.Hwnd);
+            if (!gone && !restoredByUser && !maximised) continue;
+
+            // Restored by hand somewhere unreachable? Bring it into focus instead.
+            if (restoredByUser &&
+                !Screen.AllScreens.Any(s => s.WorkingArea.IntersectsWith(Win.GetVisibleBounds(t.Hwnd))))
+            {
+                Win.SetVisibleBounds(t.Hwnd, FocusRect(FindScreen(t.ScreenName) ?? Screen.PrimaryScreen!, t.FullSize, null));
+            }
 
             _tracked.Remove(t.Hwnd);
-            if (t.Widget != null) changedWidgets = true;
-            if (t.ParkedSide.HasValue) changedColumns.Add((t.ScreenName, t.ParkedSide.Value));
+            if (t.IsStashed) changed = true;
             CloseWidget(t);
         }
 
-        if (changedWidgets) LayoutWidgets();
-        foreach (var (screenName, side) in changedColumns)
-        {
-            var screen = FindScreen(screenName);
-            if (screen != null) LayoutParked(screen, side);
-        }
-    }
-
-    // ── Layout ───────────────────────────────────────────────────────────────
-
-    /// <summary>Stacks every window parked on one side of one monitor, top to bottom.</summary>
-    private void LayoutParked(Screen screen, Side side)
-    {
-        var wa = screen.WorkingArea;
-        var zones = ZoneLayout.For(wa, _cfg.FocusWidthRatio);
-        var column = side == Side.Left ? zones.Left : zones.Right;
-        int m = _cfg.Margin;
-
-        var parked = _tracked.Values
-            .Where(t => t.ParkedSide == side && t.ScreenName == screen.DeviceName && Native.IsWindow(t.Hwnd))
-            .OrderBy(t => t.Order)
-            .ToList();
-        if (parked.Count == 0) return;
-
-        // Leave room for stash widgets on the outer edge.
-        int edgeReserve = _cfg.StashEdgePixels + StashWidget.WidgetWidth / 2;
-        int x = side == Side.Left ? column.Left + Math.Max(m, edgeReserve) : column.Left + m;
-        int width = column.Width - m - Math.Max(m, edgeReserve);
-
-        int available = wa.Height - 2 * m;
-        int maxEach = Math.Max(_cfg.MinParkedHeight, (available - (parked.Count - 1) * m) / parked.Count);
-        int y = wa.Top + m;
-
-        foreach (var t in parked)
-        {
-            double scale = width / (double)Math.Max(1, t.Original.Width);
-            int height = (int)(t.Original.Height * scale);
-            height = Math.Clamp(height, Math.Min(_cfg.MinParkedHeight, maxEach), maxEach);
-            if (y + height > wa.Bottom - m) y = Math.Max(wa.Top + m, wa.Bottom - m - height);
-
-            Win.SetVisibleBounds(t.Hwnd, new Rectangle(x, y, width, height));
-            y += height + m;
-        }
+        if (changed) LayoutWidgets();
     }
 
     /// <summary>Stacks stash widgets vertically centred on each monitor's left/right edge.</summary>
     private void LayoutWidgets()
     {
-        var groups = _tracked.Values
-            .Where(t => t.Widget != null)
-            .GroupBy(t => (t.ScreenName, t.StashSide));
+        var groups = _tracked.Values.Where(t => t.Widget != null).GroupBy(t => (t.ScreenName, t.StashSide));
 
         foreach (var group in groups)
         {
@@ -293,7 +417,7 @@ internal sealed class ZoneManager
             const int gap = 12;
             int total = widgets.Sum(w => w.Height) + gap * (widgets.Count - 1);
             int y = wa.Top + Math.Max(0, (wa.Height - total) / 2);
-            int x = group.Key.StashSide == Side.Left ? wa.Left + 8 : wa.Right - 8 - StashWidget.WidgetWidth;
+            int x = group.Key.StashSide == Side.Left ? wa.Left + 10 : wa.Right - 10 - StashWidget.WidgetWidth;
 
             foreach (var widget in widgets)
             {
@@ -301,17 +425,6 @@ internal sealed class ZoneManager
                 y += widget.Height + gap;
             }
         }
-    }
-
-    private void RelayoutEverything()
-    {
-        foreach (var screen in Screen.AllScreens)
-        {
-            LayoutParked(screen, Side.Left);
-            LayoutParked(screen, Side.Right);
-        }
-
-        LayoutWidgets();
     }
 
     private static void CloseWidget(TrackedWindow t)

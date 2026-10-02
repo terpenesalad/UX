@@ -2,19 +2,19 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>Horizon Grid</title>
+<title>KAMI UX Grid</title>
 <style>
-  html, body { margin: 0; height: 100%; overflow: hidden; background: #02030C; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0B0B0E; }
   canvas { display: block; width: 100vw; height: 100vh; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <script>
-// Horizon live wallpaper for Lively Wallpaper (https://www.rocksdanister.com/lively/).
+// KAMI UX live wallpaper for Lively Wallpaper (https://www.rocksdanister.com/lively/).
 // A flat grid behind the focus zone, curving away over the peripheries,
-// with a few slow sparks travelling outward along the lines.
-// FOCUS must match FocusWidthRatio in Horizon's config.json.
+// in dark mode, with a few faint sparks drifting outward along the lines.
+// FOCUS must match FocusWidthRatio in KAMI UX's config.json.
 const FOCUS = 0.5;
 const CELL = 64;
 const SQUEEZE = 0.3;
@@ -40,7 +40,7 @@ function build() {
   const g = base.getContext('2d');
 
   const vg = g.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.6);
-  vg.addColorStop(0, '#070A24'); vg.addColorStop(1, '#02030C');
+  vg.addColorStop(0, '#14141A'); vg.addColorStop(1, '#0B0B0E');
   g.fillStyle = vg; g.fillRect(0, 0, W, H);
 
   const fw = W * FOCUS, L = (W - fw) / 2, R = L + fw, cy = H / 2;
@@ -66,10 +66,9 @@ function build() {
   for (let x = L; x <= R + 0.5; x += cell) { path.moveTo(x, 0); path.lineTo(x, H); }
   for (let y = 0; y <= H; y += cell) { path.moveTo(L, y); path.lineTo(R, y); }
 
-  g.lineWidth = 5 * dpr; g.strokeStyle = 'rgba(53,80,255,.28)';
-  g.filter = `blur(${4 * dpr}px)`; g.stroke(path);
-  g.filter = 'none';
-  g.lineWidth = 1.4 * dpr; g.strokeStyle = 'rgba(90,116,255,.9)'; g.stroke(path);
+  g.lineWidth = 1 * dpr; g.strokeStyle = 'rgba(255,255,255,.15)'; g.stroke(path);
+  g.lineWidth = 1.5 * dpr; g.strokeStyle = 'rgba(255,255,255,.33)';
+  g.beginPath(); g.moveTo(L, 0); g.lineTo(L, H); g.moveTo(R, 0); g.lineTo(R, H); g.stroke();
 }
 
 const sparks = Array.from({ length: SPARKS }, () => ({ c: 0, t: Math.random(), v: 0.0015 + Math.random() * 0.002 }));
@@ -88,7 +87,7 @@ function frame(now) {
     const p = quad(p0, p1, p2, s.t);
     const r = 26 * (1 - s.t * 0.7) * (window.devicePixelRatio || 1);
     const grd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
-    grd.addColorStop(0, 'rgba(200,212,255,.9)'); grd.addColorStop(1, 'rgba(90,116,255,0)');
+    grd.addColorStop(0, 'rgba(255,255,255,.55)'); grd.addColorStop(1, 'rgba(255,255,255,0)');
     ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
   }
 }

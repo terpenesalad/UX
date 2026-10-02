@@ -8,9 +8,9 @@ internal sealed class StashWidget : Form
 {
     public const int WidgetWidth = 84;
 
-    private static readonly Color Background = Color.FromArgb(20, 22, 31);
-    private static readonly Color Border = Color.FromArgb(70, 84, 160);
-    private static readonly Color Tile = Color.FromArgb(34, 40, 58);
+    private static readonly Color Background = Color.FromArgb(24, 24, 28);
+    private static readonly Color Border = Color.FromArgb(62, 62, 70);
+    private static readonly Color Tile = Color.FromArgb(38, 38, 44);
     private static readonly Color TextColor = Color.FromArgb(201, 208, 219);
     private static readonly Color Accent = Color.FromArgb(232, 236, 247);
 
@@ -41,8 +41,9 @@ internal sealed class StashWidget : Form
             AccessibleName = $"Bring back {appName}"
         };
         restore.FlatAppearance.BorderSize = 0;
-        restore.FlatAppearance.MouseOverBackColor = Color.FromArgb(52, 62, 96);
-        restore.Click += (_, _) => RestoreRequested?.Invoke();
+        restore.FlatAppearance.MouseOverBackColor = Color.FromArgb(56, 56, 64);
+        // Deferred so the widget isn't disposed while its own click is still being handled.
+        restore.Click += (_, _) => BeginInvoke(new Action(() => RestoreRequested?.Invoke()));
         _tip.SetToolTip(restore, $"{windowTitle}\nClick to bring it back to focus");
         Controls.Add(restore);
 
@@ -113,7 +114,9 @@ internal sealed class StashWidget : Form
 
     private static void RoundOff(Control c, int radius)
     {
-        var region = Region.FromHrgn(Native.CreateRoundRectRgn(0, 0, c.Width + 1, c.Height + 1, radius, radius));
+        IntPtr hrgn = Native.CreateRoundRectRgn(0, 0, c.Width + 1, c.Height + 1, radius, radius);
+        var region = Region.FromHrgn(hrgn);
+        Native.DeleteObject(hrgn); // Region.FromHrgn copies it
         c.Region?.Dispose();
         c.Region = region;
     }

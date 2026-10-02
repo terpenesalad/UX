@@ -1,8 +1,8 @@
 {
   "AppVersion": "1.0.0.0",
-  "Title": "Horizon Grid",
-  "Desc": "Flat neon grid behind the focus zone, curving away at the sides. Matches the Horizon window zones.",
-  "Author": "Horizon",
+  "Title": "KAMI UX Grid",
+  "Desc": "Dark grid: flat behind the focus zone, curving away at the sides. Matches the KAMI UX window zones.",
+  "Author": "KAMI UX",
   "License": "MIT",
   "Contact": "",
   "Type": 1,

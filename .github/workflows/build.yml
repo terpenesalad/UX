@@ -1,5 +1,7 @@
-name: Build Horizon
+name: Build KAMI UX
 
+# Runs on every push to main, on pull requests, and when you click "Run workflow".
+# Pushing a tag like v0.1.0 also publishes a GitHub Release with the zip attached.
 on:
   push:
     branches: [main]
@@ -20,7 +22,7 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Build Horizon.exe (single file, no .NET install needed)
+      - name: Build KamiUX.exe (single file, no .NET install needed)
         run: >
           dotnet publish src/Horizon/Horizon.csproj
           -c Release -r win-x64 --self-contained true
@@ -33,19 +35,19 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory dist | Out-Null
-          Copy-Item out/Horizon.exe dist/
+          Copy-Item out/KamiUX.exe dist/
           Copy-Item -Recurse wallpaper dist/wallpaper
           Copy-Item README.md dist/
-          Compress-Archive -Path dist/* -DestinationPath Horizon-win-x64.zip
+          Compress-Archive -Path dist/* -DestinationPath KamiUX-win-x64.zip
 
-      - name: Upload build
+      - name: Upload build (Actions → this run → Artifacts)
         uses: actions/upload-artifact@v4
         with:
-          name: Horizon-win-x64
+          name: KamiUX-win-x64
           path: dist
 
       - name: Publish release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Horizon-win-x64.zip
+          files: KamiUX-win-x64.zip

@@ -1,75 +1,155 @@
 using System.Drawing.Drawing2D;
+using Microsoft.Win32;
 
 namespace Horizon;
 
 /// <summary>
-/// The background app: tray icon + menu, the window-drag hook, the zone overlay,
-/// global hotkeys and a housekeeping timer.
+/// The background app: tray icon + menu, wiring for the fluid drag, wallpaper, dock,
+/// video screens, global shortcuts and housekeeping.
 /// </summary>
 internal sealed class TrayApp : ApplicationContext
 {
-    private const int HotkeyParkLeft = 1, HotkeyParkRight = 2, HotkeyFocus = 3, HotkeyStash = 4, HotkeyPause = 5;
+    private const int HkParkLeft = 1, HkParkRight = 2, HkFocus = 3, HkStash = 4, HkPause = 5, HkVideo = 6, HkArrange = 7;
+    private const string StartupName = "KAMI UX";
+    private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
 
     private HorizonConfig _cfg;
     private readonly ZoneManager _zones;
+    private readonly DragController _drag;
+    private readonly CinemaManager _cinema;
+    private readonly Dock? _dock;
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _pauseItem;
     private readonly HotkeyWindow _hotkeys = new();
 
-    // The hook delegate must be kept alive for as long as the hook exists.
-    private readonly Native.WinEventDelegate _hookProc;
-    private readonly IntPtr _hook;
+    // System drags (maximised windows, keyboard moves) still go through Windows' own move loop.
+    private readonly Native.WinEventDelegate _winEventProc;
+    private readonly IntPtr _winEventHook;
+    private IntPtr _systemDragging;
+    private Rectangle _systemDragStart;
+    private bool _systemDragMoved;
+    private bool _systemDragWasMaximised;
 
-    private readonly System.Windows.Forms.Timer _dragTimer = new() { Interval = 30 };
+    private readonly System.Windows.Forms.Timer _systemDragTimer = new() { Interval = 30 };
     private readonly System.Windows.Forms.Timer _pruneTimer = new() { Interval = 1500 };
     private readonly List<ZoneOverlay> _overlays = new();
-
-    private IntPtr _dragging;
-    private Rectangle _dragStart;
-    private bool _dragIsMove;
 
     public TrayApp()
     {
         _cfg = HorizonConfig.Load();
+        Win.RescueOffscreen(_cfg); // in case a previous run ended mid-drag
+
         _zones = new ZoneManager(_cfg);
+        _cinema = new CinemaManager(() => _cfg);
 
-        _hookProc = OnWinEvent;
-        _hook = Native.SetWinEventHook(Native.EVENT_SYSTEM_MOVESIZESTART, Native.EVENT_SYSTEM_MOVESIZEEND,
-            IntPtr.Zero, _hookProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        // ── Tray menu (created first: it also sets up WinForms' UI thread context) ──
+        _pauseItem = new ToolStripMenuItem("Pause KAMI UX", null, (_, _) => TogglePause());
+        var startup = new ToolStripMenuItem("Start with Windows", null, (s, _) => ToggleStartup((ToolStripMenuItem)s!))
+        {
+            Checked = IsStartupEnabled()
+        };
 
-        _dragTimer.Tick += (_, _) => SampleDrag();
-        _pruneTimer.Tick += (_, _) => _zones.Prune();
-        _pruneTimer.Start();
-
-        var failedHotkeys = RegisterHotkeys();
-        _hotkeys.HotkeyPressed += OnHotkey;
-
-        _pauseItem = new ToolStripMenuItem("Pause Horizon", null, (_, _) => TogglePause());
         var menu = new ContextMenuStrip();
         menu.Items.Add(_pauseItem);
-        menu.Items.Add("Show zones for 2 seconds", null, (_, _) => FlashZones());
-        menu.Items.Add("Bring every window back", null, (_, _) => _zones.RestoreAll());
         menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("New video screen from active window   Win+Alt+V", null, (_, _) => _cinema.PickFromForeground());
+        menu.Items.Add("Arrange video screens   Win+Alt+A", null, (_, _) => _cinema.ArrangeAll());
+        menu.Items.Add("Close all video screens", null, (_, _) => _cinema.CloseAll());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("Bring every window back", null, (_, _) => _zones.RestoreAll());
+        menu.Items.Add("Show zones for 2 seconds", null, (_, _) => FlashZones());
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add(startup);
         menu.Items.Add("Open settings file", null, (_, _) => OpenSettings());
         menu.Items.Add("Reload settings", null, (_, _) => ReloadSettings());
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("Exit", null, (_, _) => ExitThread());
+        menu.Items.Add("Quit KAMI UX", null, (_, _) => ExitThread());
 
         _tray = new NotifyIcon
         {
             Icon = BrandIcon.Create(),
-            Text = "Horizon — ultra-wide zones",
+            Text = "KAMI UX",
             ContextMenuStrip = menu,
             Visible = true
         };
         _tray.DoubleClick += (_, _) => FlashZones();
 
-        string tip = "Drag a window to a side to park it, or right to the edge to stash it.";
-        if (failedHotkeys.Count > 0) tip += $"\nSome shortcuts are taken by another app: {string.Join(", ", failedHotkeys)}.";
-        _tray.ShowBalloonTip(5000, "Horizon is running", tip, ToolTipIcon.None);
+        // ── Fluid drag ──
+        _drag = new DragController(_zones) { Enabled = _cfg.FluidDrag };
+        _drag.Started += () => { if (_cfg.ShowZonesWhileDragging) ShowOverlays(); };
+        _drag.Moved += p => { foreach (var o in _overlays) o.TrackCursor(p); };
+        _drag.Ended += HideOverlays;
+
+        _winEventProc = OnWinEvent;
+        _winEventHook = Native.SetWinEventHook(Native.EVENT_SYSTEM_MOVESIZESTART, Native.EVENT_SYSTEM_MOVESIZEEND,
+            IntPtr.Zero, _winEventProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        _systemDragTimer.Tick += (_, _) => SampleSystemDrag();
+
+        // ── Dock + taskbar ──
+        if (_cfg.ShowDock)
+        {
+            if (_cfg.AutoHideTaskbar) Taskbar.AutoHide();
+            _dock = new Dock(_zones, _cfg);
+            _dock.Show();
+            _zones.BottomReserve = _dock.PillHeight + 16;
+        }
+        else
+        {
+            Taskbar.Restore(); // undo a previous run's auto-hide if the dock was turned off
+        }
+
+        // ── Wallpaper (after the taskbar change has settled, so the zones line up) ──
+        Delay(1200, ApplyWallpaper);
+        SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
+        SystemEvents.SessionEnding += OnSessionEnding; // put the taskbar/wallpaper back on sign-out too
+
+        // ── Housekeeping + shortcuts ──
+        _pruneTimer.Tick += (_, _) =>
+        {
+            _zones.Prune();
+            _cinema.Prune();
+        };
+        _pruneTimer.Start();
+
+        var failed = RegisterHotkeys();
+        _hotkeys.HotkeyPressed += OnHotkey;
+
+        string tip = "Drag a window by its title bar toward the sides — it drifts back and shrinks. " +
+                     "Push it to the very edge to stash it.";
+        if (failed.Count > 0) tip += $"\nShortcuts in use by another app: {string.Join(", ", failed)}.";
+        _tray.ShowBalloonTip(6000, "KAMI UX is running", tip, ToolTipIcon.None);
     }
 
-    // ── Drag tracking ────────────────────────────────────────────────────────
+    // ── Wallpaper / display ──────────────────────────────────────────────────
+
+    private void ApplyWallpaper()
+    {
+        if (_cfg.SetWallpaper) WallpaperManager.ApplyAsync(_cfg);
+        else WallpaperManager.Restore();
+    }
+
+    private void OnDisplayChanged(object? sender, EventArgs e) => Delay(1500, () =>
+    {
+        ApplyWallpaper();
+        _dock?.UpdateConfig(_cfg);
+    });
+
+    private void OnSessionEnding(object? sender, SessionEndingEventArgs e) => ExitThread();
+
+    private static void Delay(int ms, Action action)
+    {
+        var t = new System.Windows.Forms.Timer { Interval = ms };
+        t.Tick += (_, _) =>
+        {
+            t.Stop();
+            t.Dispose();
+            try { action(); }
+            catch (Exception ex) { Log.Write("Delayed action failed: " + ex); }
+        };
+        t.Start();
+    }
+
+    // ── System drags (Windows' own move loop) ────────────────────────────────
 
     private void OnWinEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
     {
@@ -77,8 +157,25 @@ internal sealed class TrayApp : ApplicationContext
 
         try
         {
-            if (eventType == Native.EVENT_SYSTEM_MOVESIZESTART) OnDragStart(hwnd);
-            else if (eventType == Native.EVENT_SYSTEM_MOVESIZEEND) OnDragEnd(hwnd);
+            if (eventType == Native.EVENT_SYSTEM_MOVESIZESTART)
+            {
+                if (_zones.Paused || !Win.IsManageable(hwnd, _cfg)) return;
+                _systemDragging = hwnd;
+                _systemDragStart = Win.GetVisibleBounds(hwnd);
+                _systemDragWasMaximised = Native.IsZoomed(hwnd);
+                _systemDragMoved = false;
+                if (_cfg.ShowZonesWhileDragging) ShowOverlays();
+                _systemDragTimer.Start();
+            }
+            else if (eventType == Native.EVENT_SYSTEM_MOVESIZEEND && hwnd == _systemDragging)
+            {
+                SampleSystemDrag();
+                _systemDragTimer.Stop();
+                HideOverlays();
+                if (_systemDragMoved && Native.GetCursorPos(out var p))
+                    _zones.HandleSystemDrop(hwnd, new Point(p.X, p.Y), _systemDragStart);
+                _systemDragging = IntPtr.Zero;
+            }
         }
         catch (Exception ex)
         {
@@ -86,39 +183,15 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private void OnDragStart(IntPtr hwnd)
+    private void SampleSystemDrag()
     {
-        if (_zones.Paused || !Win.IsManageable(hwnd, _cfg)) return;
+        if (_systemDragging == IntPtr.Zero) return;
 
-        _dragging = hwnd;
-        _dragStart = Win.GetVisibleBounds(hwnd);
-        _dragIsMove = false;
-
-        if (_cfg.ShowZonesWhileDragging) ShowOverlays();
-        _dragTimer.Start();
-    }
-
-    private void OnDragEnd(IntPtr hwnd)
-    {
-        if (hwnd != _dragging) return;
-
-        SampleDrag();
-        _dragTimer.Stop();
-        HideOverlays();
-
-        // Only react to moves. A drag that changed the size was a resize from an edge.
-        if (_dragIsMove && Native.GetCursorPos(out var p))
-            _zones.HandleDrop(hwnd, new Point(p.X, p.Y), _dragStart);
-
-        _dragging = IntPtr.Zero;
-    }
-
-    private void SampleDrag()
-    {
-        if (_dragging == IntPtr.Zero) return;
-
-        var now = Win.GetVisibleBounds(_dragging);
-        if (now.Size == _dragStart.Size && now.Location != _dragStart.Location) _dragIsMove = true;
+        // A move keeps the size; a resize from an edge doesn't. Only moves are ours to handle.
+        // (Dragging a maximised window un-maximises it, so its size changes — that's still a move.)
+        var now = Win.GetVisibleBounds(_systemDragging);
+        bool sameSize = now.Size == _systemDragStart.Size || _systemDragWasMaximised;
+        if (sameSize && now.Location != _systemDragStart.Location) _systemDragMoved = true;
 
         if (Native.GetCursorPos(out var p))
             foreach (var overlay in _overlays) overlay.TrackCursor(new Point(p.X, p.Y));
@@ -149,14 +222,7 @@ internal sealed class TrayApp : ApplicationContext
     private void FlashZones()
     {
         ShowOverlays();
-        var t = new System.Windows.Forms.Timer { Interval = 2000 };
-        t.Tick += (_, _) =>
-        {
-            t.Stop();
-            t.Dispose();
-            if (_dragging == IntPtr.Zero) HideOverlays();
-        };
-        t.Start();
+        Delay(2000, HideOverlays);
     }
 
     // ── Hotkeys ──────────────────────────────────────────────────────────────
@@ -171,23 +237,34 @@ internal sealed class TrayApp : ApplicationContext
             if (!Native.RegisterHotKey(_hotkeys.Handle, id, mods, (uint)key)) failed.Add(name);
         }
 
-        Add(HotkeyParkLeft, Keys.Left, "Win+Alt+Left");
-        Add(HotkeyParkRight, Keys.Right, "Win+Alt+Right");
-        Add(HotkeyFocus, Keys.Up, "Win+Alt+Up");
-        Add(HotkeyStash, Keys.Down, "Win+Alt+Down");
-        Add(HotkeyPause, Keys.P, "Win+Alt+P");
+        Add(HkParkLeft, Keys.Left, "Win+Alt+Left");
+        Add(HkParkRight, Keys.Right, "Win+Alt+Right");
+        Add(HkFocus, Keys.Up, "Win+Alt+Up");
+        Add(HkStash, Keys.Down, "Win+Alt+Down");
+        Add(HkPause, Keys.P, "Win+Alt+P");
+        Add(HkVideo, Keys.V, "Win+Alt+V");
+        Add(HkArrange, Keys.A, "Win+Alt+A");
         return failed;
     }
 
     private void OnHotkey(int id)
     {
-        switch (id)
+        try
         {
-            case HotkeyParkLeft: _zones.ParkForeground(Side.Left); break;
-            case HotkeyParkRight: _zones.ParkForeground(Side.Right); break;
-            case HotkeyFocus: _zones.FocusForeground(); break;
-            case HotkeyStash: _zones.StashForeground(Side.Left); break;
-            case HotkeyPause: TogglePause(); break;
+            switch (id)
+            {
+                case HkParkLeft: _zones.ParkForeground(Side.Left); break;
+                case HkParkRight: _zones.ParkForeground(Side.Right); break;
+                case HkFocus: _zones.FocusForeground(); break;
+                case HkStash: _zones.StashForeground(Side.Left); break;
+                case HkPause: TogglePause(); break;
+                case HkVideo: _cinema.PickFromForeground(); break;
+                case HkArrange: _cinema.ArrangeAll(); break;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Shortcut failed: " + ex);
         }
     }
 
@@ -197,7 +274,36 @@ internal sealed class TrayApp : ApplicationContext
     {
         _zones.Paused = !_zones.Paused;
         _pauseItem.Checked = _zones.Paused;
-        _tray.Text = _zones.Paused ? "Horizon — paused" : "Horizon — ultra-wide zones";
+        _tray.Text = _zones.Paused ? "KAMI UX — paused" : "KAMI UX";
+    }
+
+    private static bool IsStartupEnabled()
+    {
+        using var key = Registry.CurrentUser.OpenSubKey(RunKey);
+        return key?.GetValue(StartupName) != null;
+    }
+
+    private static void ToggleStartup(ToolStripMenuItem item)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            if (item.Checked)
+            {
+                key.DeleteValue(StartupName, false);
+                item.Checked = false;
+            }
+            else
+            {
+                key.DeleteValue("Horizon", false); // name used by early versions
+                key.SetValue(StartupName, $"\"{Environment.ProcessPath}\"");
+                item.Checked = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Could not change startup setting: " + ex.Message);
+        }
     }
 
     private static void OpenSettings()
@@ -219,18 +325,31 @@ internal sealed class TrayApp : ApplicationContext
     {
         _cfg = HorizonConfig.Load();
         _zones.UpdateConfig(_cfg);
-        _tray.ShowBalloonTip(2000, "Horizon", "Settings reloaded.", ToolTipIcon.None);
+        _drag.Enabled = _cfg.FluidDrag;
+        _dock?.UpdateConfig(_cfg);
+        ApplyWallpaper();
+        _tray.ShowBalloonTip(2000, "KAMI UX", "Settings reloaded. (Turning the dock on or off needs a restart.)", ToolTipIcon.None);
     }
 
     protected override void ExitThreadCore()
     {
-        _dragTimer.Stop();
+        SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
+        SystemEvents.SessionEnding -= OnSessionEnding;
         _pruneTimer.Stop();
+        _systemDragTimer.Stop();
         HideOverlays();
-        if (_cfg.RestoreWindowsOnExit) _zones.RestoreAll();
+        _drag.Dispose();
+        _cinema.CloseAll();
 
-        if (_hook != IntPtr.Zero) Native.UnhookWinEvent(_hook);
-        for (int id = HotkeyParkLeft; id <= HotkeyPause; id++) Native.UnregisterHotKey(_hotkeys.Handle, id);
+        if (_cfg.RestoreWindowsOnExit) _zones.RestoreAll();
+        else Win.RescueOffscreen(_cfg);
+        if (_cfg.RestoreWallpaperOnExit) WallpaperManager.Restore();
+
+        _dock?.Close();
+        Taskbar.Restore();
+
+        if (_winEventHook != IntPtr.Zero) Native.UnhookWinEvent(_winEventHook);
+        for (int id = HkParkLeft; id <= HkArrange; id++) Native.UnregisterHotKey(_hotkeys.Handle, id);
         _hotkeys.DestroyHandle();
 
         _tray.Visible = false;
@@ -263,9 +382,9 @@ internal static class BrandIcon
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.Clear(Color.Transparent);
-            using var bg = new SolidBrush(Color.FromArgb(10, 14, 48));
+            using var bg = new SolidBrush(Color.FromArgb(24, 24, 28));
             g.FillEllipse(bg, 1, 1, 30, 30);
-            using var pen = new Pen(Color.FromArgb(143, 162, 255), 2.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+            using var pen = new Pen(Color.FromArgb(236, 236, 240), 2.6f) { StartCap = LineCap.Round, EndCap = LineCap.Round };
             g.DrawArc(pen, 8, 10, 16, 16, 180, 180);
             g.DrawLine(pen, 6, 19, 26, 19);
             g.DrawLine(pen, 9, 23, 23, 23);

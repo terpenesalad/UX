@@ -5,10 +5,10 @@ internal static class Program
     [STAThread]
     private static void Main()
     {
-        using var mutex = new Mutex(true, "Horizon.SingleInstance", out bool isFirst);
+        using var mutex = new Mutex(true, "KamiUX.SingleInstance", out bool isFirst);
         if (!isFirst)
         {
-            MessageBox.Show("Horizon is already running — look for its icon in the system tray.", "Horizon");
+            MessageBox.Show("KAMI UX is already running — look for its icon in the system tray.", "KAMI UX");
             return;
         }
 

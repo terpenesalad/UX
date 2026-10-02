@@ -9,9 +9,9 @@ namespace Horizon;
 /// </summary>
 internal sealed class ZoneOverlay : Form
 {
-    private static readonly Color Ground = Color.FromArgb(4, 6, 26);
-    private static readonly Color Grid = Color.FromArgb(90, 116, 255);
-    private static readonly Color Label = Color.FromArgb(195, 205, 255);
+    private static readonly Color Ground = Color.FromArgb(10, 10, 12);
+    private static readonly Color Grid = Color.FromArgb(200, 200, 210);
+    private static readonly Color Label = Color.FromArgb(230, 230, 236);
 
     private readonly HorizonConfig _cfg;
     private Point? _cursor;
@@ -74,7 +74,7 @@ internal sealed class ZoneOverlay : Form
 
         if (active is Rectangle a)
         {
-            using var fill = new SolidBrush(Color.FromArgb(110, 70, 96, 255));
+            using var fill = new SolidBrush(Color.FromArgb(60, 255, 255, 255));
             g.FillRectangle(fill, a);
         }
 
@@ -85,13 +85,13 @@ internal sealed class ZoneOverlay : Form
             DrawCurvedGrid(g, thin, zones.Right, towardsLeft: false);
         }
 
-        using (var bright = new Pen(Color.FromArgb(255, 143, 162, 255), 2f) { DashStyle = DashStyle.Dash })
+        using (var bright = new Pen(Color.FromArgb(255, 225, 225, 232), 2f) { DashStyle = DashStyle.Dash })
         {
             g.DrawLine(bright, zones.Focus.Left, 0, zones.Focus.Left, Height);
             g.DrawLine(bright, zones.Focus.Right, 0, zones.Focus.Right, Height);
         }
 
-        using (var stash = new SolidBrush(Color.FromArgb(200, 143, 162, 255)))
+        using (var stash = new SolidBrush(Color.FromArgb(200, 225, 225, 232)))
         {
             g.FillRectangle(stash, 0, 0, Math.Min(edge, 6), Height);
             g.FillRectangle(stash, Width - Math.Min(edge, 6), 0, Math.Min(edge, 6), Height);
