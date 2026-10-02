@@ -41,7 +41,10 @@ internal sealed class DragController : IDisposable
     private Size _full;
     private PointF _grab;
     private double _scale;
-    private ThumbnailView? _view;
+    private ThumbnailView? _view;     // Miniature mode: the preview that moves instead of the window
+    private bool _live;               // Live mode: the real window itself moves and resizes
+    private Size _lastLiveSize;
+    private long _lastLiveResize;
     private Rectangle _viewRect;
 
     public volatile bool Enabled = true;
@@ -203,10 +206,21 @@ internal sealed class DragController : IDisposable
         _scale = _before.Width / (double)Math.Max(1, _full.Width);
 
         _viewRect = _before;
-        _view = new ThumbnailView(target, ThumbnailView.VisibleCrop(target)) { Bounds = _before };
-        _view.Show();
-        _view.Place(_before);
-        Win.MoveOffscreen(target);
+        _live = _zones.Config.LiveSideWindows;
+        if (_live)
+        {
+            // The real window moves itself, so it stays live (video keeps playing).
+            Win.ForceForeground(target);
+            _lastLiveSize = _before.Size;
+            _lastLiveResize = 0;
+        }
+        else
+        {
+            _view = new ThumbnailView(target, ThumbnailView.VisibleCrop(target)) { Bounds = _before };
+            _view.Show();
+            _view.Place(_before);
+            Win.MoveOffscreen(target);
+        }
 
         _dragging = true;
         _frame.Start();
@@ -217,7 +231,7 @@ internal sealed class DragController : IDisposable
     /// <summary>~60 fps: ease the preview's scale toward the depth at the pointer.</summary>
     private void Frame()
     {
-        if (!_dragging || _view == null) return;
+        if (!_dragging || (!_live && _view == null)) return;
 
         // Safety nets: a missed release drops in place; Esc cancels.
         if (!_buttonHeld)
@@ -260,14 +274,34 @@ internal sealed class DragController : IDisposable
 
         _scale += (target - _scale) * 0.25;
         _viewRect = Depth.ScaledAround(_full, _scale, cursor, _grab);
-        _view.Place(_viewRect, atEdge ? (byte)170 : (byte)255);
+        if (_live) MoveLive(_viewRect);
+        else _view!.Place(_viewRect, atEdge ? (byte)170 : (byte)255);
         _zones.ReportDrag(_viewRect);
         Moved?.Invoke(cursor);
     }
 
+    /// <summary>
+    /// Moves the real window every frame, but only re-sizes it when the size has changed enough
+    /// (or a moment has passed) — resizing makes apps redo their layout, moving is free.
+    /// </summary>
+    private void MoveLive(Rectangle rect)
+    {
+        long now = Environment.TickCount64;
+        bool bigChange = Math.Abs(rect.Width - _lastLiveSize.Width) >= 6 || Math.Abs(rect.Height - _lastLiveSize.Height) >= 6;
+        if (bigChange || now - _lastLiveResize > 60)
+        {
+            _lastLiveSize = rect.Size;
+            _lastLiveResize = now;
+        }
+
+        // Keep the grabbed point under the pointer at whatever size the window currently is.
+        var shown = Depth.ScaledAround(_lastLiveSize, 1.0, Cursor, _grab);
+        Win.SetVisibleBoundsAsync(_target, shown);
+    }
+
     private void Drop()
     {
-        if (!_dragging || _view == null) return;
+        if (!_dragging || (!_live && _view == null)) return;
         _frame.Stop();
         _dragging = false;
 
@@ -284,18 +318,20 @@ internal sealed class DragController : IDisposable
 
         try
         {
-            _zones.CompleteDrag(_target, cursor, finalRect, _full, _before, view);
+            if (_live) _zones.CompleteLiveDrag(_target, cursor, finalRect, _full, _before);
+            else _zones.CompleteDrag(_target, cursor, finalRect, _full, _before, view!);
         }
         catch (Exception ex)
         {
             Log.Write("Drop failed: " + ex);
-            Glide.Land(_target, _before, activate: false, view);
+            if (view != null) Glide.Land(_target, _before, activate: false, view);
+            else Win.SetVisibleBounds(_target, _before);
         }
     }
 
     private void Cancel()
     {
-        if (!_dragging || _view == null) return;
+        if (!_dragging || (!_live && _view == null)) return;
         _frame.Stop();
         _dragging = false;
 
@@ -303,7 +339,8 @@ internal sealed class DragController : IDisposable
         _view = null;
         Ended?.Invoke();
         _zones.ReportDrag(null, dropped: true);
-        Glide.Land(_target, _before, activate: false, view);
+        if (view != null) Glide.Land(_target, _before, activate: false, view);
+        else Glide.MoveReal(_target, Win.GetVisibleBounds(_target), _before, activate: false);
     }
 
     public void Dispose()

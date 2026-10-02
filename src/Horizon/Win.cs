@@ -30,10 +30,19 @@ internal static class Win
         if (ShellClasses.Contains(ClassName(hwnd))) return false;
 
         uint pid = ProcessId(hwnd);
-        if (pid == Environment.ProcessId) return false;
+        if (pid == Environment.ProcessId && !OwnAppWindows.ContainsKey(hwnd)) return false;
 
         string process = ProcessName(pid);
         return !cfg.IgnoreProcesses.Any(p => string.Equals(p, process, StringComparison.OrdinalIgnoreCase));
+    }
+
+    /// <summary>KAMI UX's own app windows (Files, Settings) — treated like any other app's windows.</summary>
+    public static readonly System.Collections.Concurrent.ConcurrentDictionary<IntPtr, byte> OwnAppWindows = new();
+
+    public static void RegisterAppWindow(Form form)
+    {
+        form.HandleCreated += (_, _) => OwnAppWindows[form.Handle] = 0;
+        form.HandleDestroyed += (_, _) => OwnAppWindows.TryRemove(form.Handle, out _);
     }
 
     /// <summary>Windows on another virtual desktop (and some hidden UWP frames) are "cloaked".</summary>
@@ -94,6 +103,25 @@ internal static class Win
             // Usually an app running as administrator: Windows blocks non-admin apps from moving it.
             Log.Write($"Could not move window '{Title(hwnd)}' (error {Marshal.GetLastWin32Error()}).");
         }
+    }
+
+    /// <summary>
+    /// Like <see cref="SetVisibleBounds"/>, but doesn't wait for the app to respond (used every frame
+    /// while dragging/gliding live windows). Only resizes when the size really changes.
+    /// </summary>
+    public static void SetVisibleBoundsAsync(IntPtr hwnd, Rectangle target)
+    {
+        var outer = GetOuterBounds(hwnd);
+        var visible = GetVisibleBounds(hwnd);
+        int left = visible.Left - outer.Left, top = visible.Top - outer.Top;
+        int right = outer.Right - visible.Right, bottom = outer.Bottom - visible.Bottom;
+
+        uint flags = Native.SWP_NOZORDER | Native.SWP_NOACTIVATE | Native.SWP_ASYNCWINDOWPOS;
+        if (Math.Abs(visible.Width - target.Width) < 2 && Math.Abs(visible.Height - target.Height) < 2)
+            flags |= Native.SWP_NOSIZE;
+
+        Native.SetWindowPos(hwnd, IntPtr.Zero, target.X - left, target.Y - top,
+            target.Width + left + right, target.Height + top + bottom, flags);
     }
 
     /// <summary>
@@ -284,7 +312,11 @@ internal static class Win
     /// The crisp, large icon Explorer would show for a file or shortcut (works for .lnk, .exe
     /// and Store-app shortcuts). Returns null if the shell can't provide one.
     /// </summary>
-    public static Bitmap? ShellIcon(string path, int size)
+    public static Bitmap? ShellIcon(string path, int size) => ShellImage(path, size, iconOnly: true);
+
+    /// <summary>Like <see cref="ShellIcon"/>, but with <paramref name="iconOnly"/> false you get a
+    /// picture's or video's thumbnail (what Explorer shows in large-icon view).</summary>
+    public static Bitmap? ShellImage(string path, int size, bool iconOnly)
     {
         IntPtr hbm = IntPtr.Zero;
         try
@@ -292,7 +324,8 @@ internal static class Win
             var iid = typeof(Native.IShellItemImageFactory).GUID;
             Native.SHCreateItemFromParsingName(path, IntPtr.Zero, ref iid, out var factory);
             var sz = new Native.SIZE { cx = size, cy = size };
-            if (factory.GetImage(sz, Native.SIIGBF_ICONONLY | Native.SIIGBF_BIGGERSIZEOK, out hbm) != 0 || hbm == IntPtr.Zero)
+            int flags = Native.SIIGBF_BIGGERSIZEOK | (iconOnly ? Native.SIIGBF_ICONONLY : 0);
+            if (factory.GetImage(sz, flags, out hbm) != 0 || hbm == IntPtr.Zero)
                 return null;
 
             return BitmapWithAlpha(hbm, size);
@@ -323,7 +356,10 @@ internal static class Win
             using (var g = Graphics.FromImage(result))
             {
                 g.InterpolationMode = System.Drawing.Drawing2D.InterpolationMode.HighQualityBicubic;
-                g.DrawImage(withAlpha, new Rectangle(0, 0, size, size));
+                // Fit, don't stretch (thumbnails aren't square).
+                float k = Math.Min(size / (float)data.Width, size / (float)data.Height);
+                int w = Math.Max(1, (int)(data.Width * k)), h = Math.Max(1, (int)(data.Height * k));
+                g.DrawImage(withAlpha, new Rectangle((size - w) / 2, (size - h) / 2, w, h));
             }
 
             return result;

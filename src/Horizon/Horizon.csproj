@@ -11,7 +11,7 @@
     <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
     <!-- Lets the project compile on non-Windows machines too (the real build runs on GitHub's Windows runner). -->
     <EnableWindowsTargeting>true</EnableWindowsTargeting>
-    <Version>0.3.0</Version>
+    <Version>0.4.0</Version>
     <Product>KAMI UX</Product>
     <Description>Ultra-wide desktop zones: focus in the middle, periphery at the sides, stash at the edges.</Description>
   </PropertyGroup>

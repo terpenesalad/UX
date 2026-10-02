@@ -14,9 +14,15 @@ KAMI UX turns a wide monitor (or a projected PC screen) into a depth-aware deskt
  ▲ stash edge                                       stash edge ▲
 ```
 
-- **Depth drag:** grab any window by its title bar and pull it toward a side. The *whole* window shrinks smoothly, contents and all, as if it's being pushed further away. Let go and it stays there as a live miniature (videos keep playing). Click it, pick it in the dock, or Alt+Tab to it and it glides back to full size; drag it into the middle and it grows as it comes.
+- **Depth drag:** grab any window by its title bar and pull it toward a side. It shrinks smoothly as if it's being pushed further away, and grows again as you bring it back to the middle. There are two styles, set in Settings:
+  - **Live** (default): the real window gets smaller, so you can keep using it right where it is and video keeps playing.
+  - **Miniature:** a scaled picture of the whole window, contents and all; click it to bring it back. Windows doesn't let an app draw another app's window smaller *and* stay clickable, so you choose which matters more.
+- **Make room:** windows don't pile on top of each other. When one lands, its neighbours slide aside, and any that get pushed toward the sides shrink.
 - **Stash:** push a window all the way to the screen edge and it tucks into a small widget showing its icon. Music apps get a play/pause button. Click the widget to bring the window back.
 - **Living grid:** a dark grid sits behind your desktop icons. The flat part is behind the focus zone and the curves are behind the sides. As you move a window, the grid lines around it light up and trail off behind it. Window edges that land on a line glow brightest, snap onto it, and pulse when you let go. Your old wallpaper comes back when KAMI UX quits.
+- **Settings app:** the gear at the end of the dock opens KAMI UX Settings. Every option is there and changes apply instantly.
+- **KAMI Files:** a minimal, dark, Finder-style file browser. It has a sidebar, breadcrumbs, big icons and photo thumbnails (or a list), instant filter and deep search (Enter in the search box), and drag and drop, rename, copy/cut/paste, new folder and Recycle Bin. The dock's Files icon opens it.
+- **Clean desktop:** desktop icons are hidden while KAMI UX runs and come back when it quits.
 - **Your own OS look:** while KAMI UX runs, Windows switches to dark mode (Explorer, Settings, Start, and apps that follow the system), and every window gets the same minimal near-black title bar with no coloured border. Everything goes back to how it was when you quit.
 - **Dock:** your pinned taskbar apps, in the same order, plus anything else running, in a dock that magnifies under the pointer. A dot means the app is running. Click to open or switch, shift- or middle-click for a new window. Clicking an app that's parked or stashed brings it back to focus. The Windows taskbar is hidden completely while the dock is up, so it can't pop up when your mouse touches the bottom edge.
 - **Video screens:** press `Win + Alt + V` and draw a box around a video in any window (browser, VLC, a video call). It becomes its own borderless screen. You can resize it, scroll to zoom, or double-click to go big, and you can run several at once. `Win + Alt + A` arranges them all in a neat grid.
@@ -104,8 +110,8 @@ KAMI UX sets the grid wallpaper itself. The `wallpaper` folder also has the same
 ## Known limits
 
 - **Apps running as administrator** can't be moved by a normal app; that's a Windows security rule. Run KAMI UX as admin too if you need it.
-- **Far-off windows are for looking, not clicking into.** A click brings the window back to focus; you can't type into it while it's small.
-- **Browsers may pause while far off.** Chrome, Edge and Firefox stop drawing windows they think are hidden, so a far-off browser can show a still frame. To keep them live, turn off their occlusion tracking:
+- **In Miniature mode, far-off windows are for looking, not clicking into.** A click brings the window back. (Live mode doesn't have this limit.)
+- **Miniature mode only: browsers may pause while far off.** Chrome, Edge and Firefox stop drawing windows they think are hidden, so a far-off browser can show a still frame. To keep them live, turn off their occlusion tracking:
   - **Chrome / Edge:** add `--disable-features=CalculateNativeWinOcclusion` to the shortcut.
   - **Firefox:** in `about:config`, set `widget.windows.window_occlusion_tracking.enabled` to `false`.
   Or use a video screen (`Win+Alt+V`), which keeps playing without this.

@@ -28,6 +28,14 @@ internal sealed class LiveGrid : IDisposable
         Start();
     }
 
+    /// <summary>New settings that don't change the grid's shape (e.g. snapping).</summary>
+    public void UpdateConfig(HorizonConfig cfg)
+    {
+        bool reshape = cfg.LiveGrid != _cfg.LiveGrid || Math.Abs(cfg.FocusWidthRatio - _cfg.FocusWidthRatio) > 0.0001;
+        if (reshape) Rebuild(cfg);
+        else _cfg = cfg;
+    }
+
     public void Rebuild(HorizonConfig cfg)
     {
         _cfg = cfg;

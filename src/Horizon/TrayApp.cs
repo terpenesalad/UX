@@ -17,7 +17,8 @@ internal sealed class TrayApp : ApplicationContext
     private readonly ZoneManager _zones;
     private readonly DragController _drag;
     private readonly CinemaManager _cinema;
-    private readonly Dock? _dock;
+    private Dock? _dock;
+    private SettingsWindow? _settings;
     private readonly NotifyIcon _tray;
     private readonly ToolStripMenuItem _pauseItem;
     private readonly HotkeyWindow _hotkeys = new();
@@ -65,6 +66,8 @@ internal sealed class TrayApp : ApplicationContext
         };
 
         var menu = new ContextMenuStrip();
+        menu.Items.Add("Settings…", null, (_, _) => OpenSettingsWindow());
+        menu.Items.Add("Files", null, (_, _) => KamiFiles.OpenOrFocus());
         menu.Items.Add(_pauseItem);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("New video screen from active window   Win+Alt+V", null, (_, _) => _cinema.PickFromForeground());
@@ -76,7 +79,6 @@ internal sealed class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add(startup);
         menu.Items.Add("Open settings file", null, (_, _) => OpenSettings());
-        menu.Items.Add("Reload settings", null, (_, _) => ReloadSettings());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Quit KAMI UX", null, (_, _) => ExitThread());
 
@@ -109,25 +111,9 @@ internal sealed class TrayApp : ApplicationContext
         _showHook = Native.SetWinEventHook(Native.EVENT_OBJECT_SHOW, Native.EVENT_OBJECT_SHOW,
             IntPtr.Zero, _shellEventProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
 
-        // ── Dock + taskbar ──
-        if (_cfg.ShowDock)
-        {
-            if (_cfg.AutoHideTaskbar)
-            {
-                Taskbar.AutoHide();
-                Taskbar.KeepHidden();
-                _taskbarTimer.Tick += (_, _) => Taskbar.KeepHidden(); // Windows sometimes brings it back
-                _taskbarTimer.Start();
-            }
-
-            _dock = new Dock(_zones, _cfg);
-            _dock.Show();
-            _zones.BottomReserve = _dock.PillHeight + 16;
-        }
-        else
-        {
-            Taskbar.Restore(); // undo a previous run's auto-hide if the dock was turned off
-        }
+        // ── Dock, taskbar, desktop icons ──
+        _taskbarTimer.Tick += (_, _) => Taskbar.KeepHidden(); // Windows sometimes brings it back
+        ApplyDockAndDesktop(null);
 
         // ── Wallpaper (after the taskbar change has settled, so the zones line up) ──
         Delay(1200, ApplyWallpaper);
@@ -346,6 +332,21 @@ internal sealed class TrayApp : ApplicationContext
         return key?.GetValue(StartupName) != null;
     }
 
+    private static void SetStartup(bool on)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(RunKey);
+            key.DeleteValue("Horizon", false); // name used by early versions
+            if (on) key.SetValue(StartupName, $"\"{Environment.ProcessPath}\"");
+            else key.DeleteValue(StartupName, false);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Could not change startup setting: " + ex.Message);
+        }
+    }
+
     private static void ToggleStartup(ToolStripMenuItem item)
     {
         try
@@ -384,16 +385,94 @@ internal sealed class TrayApp : ApplicationContext
         }
     }
 
-    private void ReloadSettings()
+    /// <summary>Applies new settings straight away (from the Settings app).</summary>
+    private void ApplySettings(HorizonConfig next)
     {
-        _cfg = HorizonConfig.Load();
+        var previous = _cfg;
+        _cfg = next;
+
         _zones.UpdateConfig(_cfg);
         _drag.Enabled = _cfg.FluidDrag;
-        _dock?.UpdateConfig(_cfg);
         _theme.UpdateConfig(_cfg);
-        _grid?.Rebuild(_cfg);
-        ApplyWallpaper();
-        _tray.ShowBalloonTip(2000, "KAMI UX", "Settings reloaded. (Turning the dock on or off needs a restart.)", ToolTipIcon.None);
+        _grid?.UpdateConfig(_cfg);
+        ApplyDockAndDesktop(previous);
+
+        bool wallpaperChanged = previous.SetWallpaper != _cfg.SetWallpaper ||
+                                Math.Abs(previous.FocusWidthRatio - _cfg.FocusWidthRatio) > 0.0001;
+        if (wallpaperChanged) ApplyWallpaper();
+    }
+
+    /// <summary>Dock on/off, taskbar hidden or not, desktop icons hidden or not.</summary>
+    private void ApplyDockAndDesktop(HorizonConfig? previous)
+    {
+        if (_cfg.HideDesktopIcons) DesktopIcons.Hide();
+        else DesktopIcons.Show();
+
+        if (_cfg.ShowDock)
+        {
+            if (_dock == null || _dock.IsDisposed)
+            {
+                _dock = new Dock(_zones, _cfg, new Dock.Extras
+                {
+                    OpenFiles = KamiFiles.OpenOrFocus,
+                    FilesOpen = () => KamiFiles.AnyOpen,
+                    OpenSettings = OpenSettingsWindow,
+                    SettingsOpen = () => _settings is { IsDisposed: false, Visible: true }
+                });
+            }
+            else if (previous != null)
+            {
+                _dock.UpdateConfig(_cfg);
+            }
+
+            _dock.Show();
+            _zones.BottomReserve = _dock.PillHeight + 16;
+        }
+        else
+        {
+            _dock?.Hide();
+            _zones.BottomReserve = 0;
+        }
+
+        if (_cfg.ShowDock && _cfg.AutoHideTaskbar)
+        {
+            Taskbar.AutoHide();
+            Taskbar.KeepHidden();
+            _taskbarTimer.Start();
+        }
+        else
+        {
+            _taskbarTimer.Stop();
+            Taskbar.Restore(); // shows it again (and undoes a previous run's auto-hide)
+        }
+    }
+
+    private void OpenSettingsWindow()
+    {
+        if (_settings is { IsDisposed: false })
+        {
+            if (_settings.WindowState == FormWindowState.Minimized) _settings.WindowState = FormWindowState.Normal;
+            _settings.Show();
+            Win.ForceForeground(_settings.Handle);
+            return;
+        }
+
+        _settings = new SettingsWindow(_cfg, ApplySettings, new TrayActions
+        {
+            IsStartupEnabled = IsStartupEnabled,
+            SetStartup = SetStartup,
+            RestoreAll = () => _zones.RestoreAll(),
+            OpenLogFolder = () => OpenFolder(HorizonConfig.Folder),
+            Quit = ExitThread
+        });
+        _settings.Show();
+        Win.ForceForeground(_settings.Handle);
+    }
+
+    private static void OpenFolder(string path)
+    {
+        try { System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) { Log.Write("Could not open folder: " + ex.Message); }
     }
 
     protected override void ExitThreadCore()
@@ -413,8 +492,10 @@ internal sealed class TrayApp : ApplicationContext
         else Win.RescueOffscreen(_cfg);
         if (_cfg.RestoreWallpaperOnExit) WallpaperManager.Restore();
 
+        _settings?.Close();
         _dock?.Close();
         Taskbar.Restore();
+        DesktopIcons.Show();
 
         if (_winEventHook != IntPtr.Zero) Native.UnhookWinEvent(_winEventHook);
         if (_foregroundHook != IntPtr.Zero) Native.UnhookWinEvent(_foregroundHook);

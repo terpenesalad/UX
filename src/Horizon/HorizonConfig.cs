@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace Horizon;
 
@@ -23,7 +24,19 @@ internal sealed class HorizonConfig
     public int Margin { get; set; } = 16;
 
     // Behaviour
-    /// <summary>Horizon handles title-bar drags itself so windows shrink smoothly with depth.</summary>
+    /// <summary>
+    /// "Live": windows at the sides are the real window, just smaller — usable, video keeps playing.
+    /// "Miniature": a scaled picture of the whole window — click it to bring it back.
+    /// </summary>
+    public string SideWindows { get; set; } = "Live";
+
+    [JsonIgnore]
+    public bool LiveSideWindows => !string.Equals(SideWindows, "Miniature", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Windows slide aside to make room instead of overlapping.</summary>
+    public bool AvoidOverlap { get; set; } = true;
+
+    /// <summary>KAMI UX handles title-bar drags itself so windows shrink smoothly with depth.</summary>
     public bool FluidDrag { get; set; } = true;
 
     /// <summary>Glide windows into place when using shortcuts, the dock or stash widgets.</summary>
@@ -42,7 +55,13 @@ internal sealed class HorizonConfig
     /// <summary>Put your previous wallpaper back when Horizon exits.</summary>
     public bool RestoreWallpaperOnExit { get; set; } = true;
 
-    /// <summary>Show the Horizon dock (built from your pinned taskbar apps).</summary>
+    /// <summary>Hide desktop icons while KAMI UX runs, for a clean background (shown again on quit).</summary>
+    public bool HideDesktopIcons { get; set; } = true;
+
+    /// <summary>The dock's Files icon opens KAMI Files (the minimal file browser) instead of Explorer.</summary>
+    public bool UseKamiFiles { get; set; } = true;
+
+    /// <summary>Show the KAMI UX dock (built from your pinned taskbar apps).</summary>
     public bool ShowDock { get; set; } = true;
 
     /// <summary>Hide the Windows taskbar completely while KAMI UX runs (restored on exit).</summary>
@@ -96,6 +115,23 @@ internal sealed class HorizonConfig
         ReadCommentHandling = JsonCommentHandling.Skip,
         AllowTrailingCommas = true
     };
+
+    /// <summary>Writes the current settings to config.json.</summary>
+    public void Save()
+    {
+        try
+        {
+            Directory.CreateDirectory(Folder);
+            File.WriteAllText(FilePath, JsonSerializer.Serialize(Clamped(), JsonOptions));
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Could not save settings: " + ex.Message);
+        }
+    }
+
+    public HorizonConfig Clone() =>
+        JsonSerializer.Deserialize<HorizonConfig>(JsonSerializer.Serialize(this, JsonOptions), JsonOptions) ?? new();
 
     public static HorizonConfig Load()
     {

@@ -143,6 +143,61 @@ internal sealed class ZoneManager
         ParkInto(t, viewRect, parked, view);
     }
 
+    /// <summary>
+    /// Live mode: a title-bar drag ended. The real window has been moving and resizing with the
+    /// pointer the whole time; settle it at the right size for where it was dropped.
+    /// </summary>
+    public void CompleteLiveDrag(IntPtr hwnd, Point cursor, Rectangle rect, Size fullSize, Rectangle before)
+    {
+        var screen = Screen.FromPoint(cursor);
+        var t = Track(hwnd, screen, fullSize, before);
+        var now = Win.GetVisibleBounds(hwnd);
+
+        if (StashEdgeAt(cursor) is Side side)
+        {
+            ReportDrag(null, dropped: true);
+            Stash(t, side, screen, null, now);
+            return;
+        }
+
+        Rectangle target;
+        if (InFocusZone(cursor))
+        {
+            target = Snapped(FullSizeAround(t.FullSize, rect, cursor), screen);
+            _tracked.Remove(hwnd);
+            CloseWidget(t);
+        }
+        else
+        {
+            target = Snapped(rect, screen);
+        }
+
+        ReportDrag(target, dropped: true);
+        Glide.MoveReal(hwnd, now, target, activate: true, () => Settle(hwnd, target, screen));
+    }
+
+    /// <summary>After a window lands: make room around it, so windows sit side by side, not on top.</summary>
+    private void Settle(IntPtr hwnd, Rectangle landed, Screen screen)
+    {
+        if (!_cfg.AvoidOverlap || Paused) return;
+
+        foreach (var (other, to) in LayoutSolver.MakeRoom(hwnd, landed, screen, FullSizeOf, _cfg, BottomReserve))
+        {
+            var full = FullSizeOf(other);
+            var from = Win.GetVisibleBounds(other);
+            if (to.Width < full.Width * 0.97)
+            {
+                Track(other, screen, full, from).FullSize = full;
+            }
+            else if (_tracked.TryGetValue(other, out var known) && known.View == null && !known.IsStashed)
+            {
+                _tracked.Remove(other);
+            }
+
+            Glide.Move(other, to, activate: false, _cfg);
+        }
+    }
+
     /// <summary>A parked view was dragged and let go.</summary>
     public void CompleteViewDrag(ParkedView view, Point cursor, Rectangle rect)
     {
@@ -199,6 +254,7 @@ internal sealed class ZoneManager
             _tracked.Remove(hwnd);
             var snapped = Snapped(now, screen);
             if (snapped != now) Win.SetVisibleBounds(hwnd, snapped);
+            Settle(hwnd, snapped, screen);
             return;
         }
 
@@ -207,7 +263,8 @@ internal sealed class ZoneManager
             Math.Clamp((cursor.Y - now.Top) / (float)Math.Max(1, now.Height), 0, 1));
         double scale = Depth.Scale(cursor.X, screen.WorkingArea, _cfg);
         var target = Snapped(Depth.ScaledAround(t.FullSize, scale, cursor, fraction), screen);
-        ParkInto(t, now, target, null);
+        if (_cfg.LiveSideWindows) Glide.Move(hwnd, target, activate: true, _cfg, () => Settle(hwnd, target, screen));
+        else ParkInto(t, now, target, null);
     }
 
     /// <summary>Full-size rectangle that keeps the same point of the window under the pointer.</summary>
@@ -277,7 +334,8 @@ internal sealed class ZoneManager
         int cx = column.Left + column.Width / 2;
         double scale = Depth.Scale(cx, wa, _cfg);
         var target = Snapped(Depth.ScaledAround(t.FullSize, scale, new Point(cx, now.Top + now.Height / 2), new PointF(0.5f, 0.5f)), screen);
-        ParkInto(t, now, target, null);
+        if (_cfg.LiveSideWindows) Glide.Move(hwnd, target, activate: false, _cfg, () => Settle(hwnd, target, screen));
+        else ParkInto(t, now, target, null);
     }
 
     public void StashForeground(Side side)
@@ -335,7 +393,8 @@ internal sealed class ZoneManager
         }
 
         var now = Win.GetVisibleBounds(hwnd);
-        Glide.Move(hwnd, FocusRect(screen, full, now.Top + now.Height / 2), activate: true, _cfg);
+        var target = FocusRect(screen, full, now.Top + now.Height / 2);
+        Glide.Move(hwnd, target, activate: true, _cfg, () => Settle(hwnd, target, screen));
     }
 
     /// <summary>Full size, centred in the focus zone, kept clear of the dock.</summary>

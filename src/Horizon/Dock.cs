@@ -15,6 +15,12 @@ internal sealed class DockItem
     public string? GroupKey { get; init; }     // for unpinned running apps
     public bool Pinned { get; init; }
 
+    /// <summary>For KAMI UX's own apps (Files, Settings): what clicking does, and whether it's open.</summary>
+    public Action? Open { get; set; }
+    public Func<bool>? IsOpen { get; set; }
+
+    public bool ShowsRunning => Windows.Count > 0 || (IsOpen?.Invoke() ?? false);
+
     public List<IntPtr> Windows { get; } = new();
     public int Cycle { get; set; }
 
@@ -53,8 +59,34 @@ internal sealed class Dock : Form
 
     public int PillHeight => _cfg.DockIconSize + 2 * Pad + DotSpace;
 
-    public Dock(ZoneManager zones, HorizonConfig cfg)
+    /// <summary>KAMI UX's own apps for the dock.</summary>
+    public sealed class Extras
     {
+        public required Action OpenFiles { get; init; }
+        public required Func<bool> FilesOpen { get; init; }
+        public required Action OpenSettings { get; init; }
+        public required Func<bool> SettingsOpen { get; init; }
+    }
+
+    private readonly Extras _extras;
+    private readonly DockItem _filesItem;
+    private readonly DockItem _settingsItem;
+    private int _firstGroup; // how many icons sit before the divider
+
+    public Dock(ZoneManager zones, HorizonConfig cfg, Extras extras)
+    {
+        _extras = extras;
+        _filesItem = new DockItem
+        {
+            Name = "Files", Icon = BuiltinIcon.Files(128), Pinned = true, Size = cfg.DockIconSize,
+            Open = extras.OpenFiles, IsOpen = extras.FilesOpen
+        };
+        _settingsItem = new DockItem
+        {
+            Name = "KAMI UX Settings", Icon = BuiltinIcon.Settings(128), Pinned = true, Size = cfg.DockIconSize,
+            Open = extras.OpenSettings, IsOpen = extras.SettingsOpen
+        };
+
         _zones = zones;
         _cfg = cfg;
 
@@ -207,6 +239,8 @@ internal sealed class Dock : Form
 
             foreach (var hwnd in Win.AppWindows(_cfg))
             {
+                if (Win.ProcessId(hwnd) == Environment.ProcessId) continue; // Files/Settings have their own icons
+
                 string? path = Win.ProcessPath(hwnd);
                 string friendly = Win.FriendlyAppName(hwnd);
 
@@ -246,7 +280,31 @@ internal sealed class Dock : Form
                 if (_running.Remove(key, out var gone)) gone.Icon.Dispose();
             }
 
-            var items = _pinned.Concat(_running.Values).ToList();
+            // Files first (taking over a pinned File Explorer if there is one), then your pinned
+            // apps, a divider, anything else running, and Settings at the end.
+            var first = new List<DockItem>();
+            bool explorerPinned = false;
+            foreach (var p in _pinned)
+            {
+                bool isExplorer = p.TargetPath != null &&
+                                  Path.GetFileName(p.TargetPath).Equals("explorer.exe", StringComparison.OrdinalIgnoreCase);
+                if (isExplorer && _cfg.UseKamiFiles)
+                {
+                    explorerPinned = true;
+                    _filesItem.Windows.Clear();
+                    _filesItem.Windows.AddRange(p.Windows);
+                    first.Add(_filesItem);
+                }
+                else
+                {
+                    first.Add(p);
+                }
+            }
+
+            if (_cfg.UseKamiFiles && !explorerPinned) first.Insert(0, _filesItem);
+            _firstGroup = first.Count;
+
+            var items = first.Concat(_running.Values).Append(_settingsItem).ToList();
             bool changed = items.Count != _items.Count || !items.SequenceEqual(_items);
             _items = items;
             if (changed) Relayout();
@@ -294,7 +352,7 @@ internal sealed class Dock : Form
         Render();
     }
 
-    private bool HasSeparator => _pinned.Count > 0 && _running.Count > 0;
+    private bool HasSeparator => _firstGroup > 0 && _items.Count > _firstGroup;
 
     private void Render()
     {
@@ -348,7 +406,7 @@ internal sealed class Dock : Form
             }
 
             x += (float)slot;
-            if (HasSeparator && i == _pinned.Count - 1) x += SeparatorWidth;
+            if (HasSeparator && i == _firstGroup - 1) x += SeparatorWidth;
         }
 
         return moving;
@@ -394,14 +452,14 @@ internal sealed class Dock : Form
             item.Bounds = rect;
             g.DrawImage(item.Icon, rect);
 
-            if (item.Windows.Count > 0)
+            if (item.ShowsRunning)
             {
                 using var dot = new SolidBrush(Color.FromArgb(225, 225, 230));
                 g.FillEllipse(dot, x + size / 2 - 2.5f, floor + 3, 5, 5);
             }
 
             x += size + Gap;
-            if (HasSeparator && i == _pinned.Count - 1)
+            if (HasSeparator && i == _firstGroup - 1)
             {
                 using var sep = new Pen(Color.FromArgb(60, 255, 255, 255), 1f);
                 float sx = x - Gap / 2f + SeparatorWidth / 2f;
@@ -502,6 +560,15 @@ internal sealed class Dock : Form
 
     private void Activate(DockItem item)
     {
+        if (item.Open != null)
+        {
+            // Our own apps. (A pinned File Explorer's windows still come back to focus if they're away.)
+            var away = item.Windows.FirstOrDefault(w => _zones.IsTracked(w));
+            if (away != IntPtr.Zero) _zones.BringToFocus(away);
+            else item.Open();
+            return;
+        }
+
         var windows = item.Windows.Where(Native.IsWindow).ToList();
         if (windows.Count == 0)
         {

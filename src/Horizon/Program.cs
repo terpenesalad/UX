@@ -18,6 +18,7 @@ internal static class Program
         {
             Log.Write("Fatal: " + e.ExceptionObject);
             try { Taskbar.ShowAll(); } catch { /* best effort: never leave the taskbar hidden */ }
+            try { DesktopIcons.Show(); } catch { /* likewise the desktop icons */ }
         };
 
         Application.Run(new TrayApp());

@@ -130,6 +130,12 @@ internal static class Glide
     public static void Move(IntPtr hwnd, Rectangle to, bool activate, HorizonConfig cfg, Action? done = null)
     {
         var from = Win.GetVisibleBounds(hwnd);
+        if (cfg.LiveSideWindows && cfg.AnimateMoves && !Native.IsIconic(hwnd) && from != to)
+        {
+            MoveReal(hwnd, from, to, activate, done);
+            return;
+        }
+
         if (!cfg.AnimateMoves || Native.IsIconic(hwnd) || from == to)
         {
             Win.SetVisibleBounds(hwnd, to);
@@ -155,6 +161,49 @@ internal static class Glide
             timer.Stop();
             timer.Dispose();
             Land(hwnd, to, activate, view, done);
+        };
+        timer.Start();
+    }
+
+    private static readonly Dictionary<IntPtr, System.Windows.Forms.Timer> Running = new();
+
+    /// <summary>
+    /// Glides the real window itself (no stand-in), so it stays live the whole way — video keeps
+    /// playing. Moves are asynchronous so a slow app can never stall KAMI UX.
+    /// </summary>
+    public static void MoveReal(IntPtr hwnd, Rectangle from, Rectangle to, bool activate, Action? done = null)
+    {
+        if (Running.Remove(hwnd, out var old))
+        {
+            old.Stop();
+            old.Dispose();
+        }
+
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
+        if (activate) Win.ForceForeground(hwnd);
+
+        var started = Environment.TickCount64;
+        var timer = new System.Windows.Forms.Timer { Interval = 15 };
+        Running[hwnd] = timer;
+        timer.Tick += (_, _) =>
+        {
+            if (!Native.IsWindow(hwnd))
+            {
+                timer.Stop();
+                Running.Remove(hwnd);
+                timer.Dispose();
+                return;
+            }
+
+            double t = Math.Min(1, (Environment.TickCount64 - started) / (double)DurationMs);
+            Win.SetVisibleBoundsAsync(hwnd, Lerp(from, to, Depth.EaseOutCubic(t)));
+            if (t < 1) return;
+
+            timer.Stop();
+            Running.Remove(hwnd);
+            timer.Dispose();
+            Win.SetVisibleBounds(hwnd, to); // land exactly
+            done?.Invoke();
         };
         timer.Start();
     }
