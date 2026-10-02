@@ -1,0 +1,12 @@
+{
+  "AppVersion": "1.0.0.0",
+  "Title": "Horizon Grid",
+  "Desc": "Flat neon grid behind the focus zone, curving away at the sides. Matches the Horizon window zones.",
+  "Author": "Horizon",
+  "License": "MIT",
+  "Contact": "",
+  "Type": 1,
+  "FileName": "index.html",
+  "Arguments": null,
+  "IsAbsolutePath": false
+}

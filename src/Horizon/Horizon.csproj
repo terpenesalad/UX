@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>Horizon</AssemblyName>
+    <RootNamespace>Horizon</RootNamespace>
+    <ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+    <!-- Lets the project compile on non-Windows machines too (the real build runs on GitHub's Windows runner). -->
+    <EnableWindowsTargeting>true</EnableWindowsTargeting>
+    <Version>0.1.0</Version>
+    <Product>Horizon</Product>
+    <Description>Ultra-wide desktop zones: focus in the middle, periphery at the sides, stash at the edges.</Description>
+  </PropertyGroup>
+
+</Project>

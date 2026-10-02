@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Horizon Grid</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #02030C; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+// Horizon live wallpaper for Lively Wallpaper (https://www.rocksdanister.com/lively/).
+// A flat grid behind the focus zone, curving away over the peripheries,
+// with a few slow sparks travelling outward along the lines.
+// FOCUS must match FocusWidthRatio in Horizon's config.json.
+const FOCUS = 0.5;
+const CELL = 64;
+const SQUEEZE = 0.3;
+const SPARKS = 14;
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+let W, H, base, curves = [];
+
+function quad(p0, p1, p2, t) {
+  const u = 1 - t;
+  return { x: u * u * p0.x + 2 * u * t * p1.x + t * t * p2.x, y: u * u * p0.y + 2 * u * t * p1.y + t * t * p2.y };
+}
+
+function build() {
+  const dpr = window.devicePixelRatio || 1;
+  W = Math.round(window.innerWidth * dpr);
+  H = Math.round(window.innerHeight * dpr);
+  canvas.width = W; canvas.height = H;
+
+  base = document.createElement('canvas');
+  base.width = W; base.height = H;
+  const g = base.getContext('2d');
+
+  const vg = g.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, W * 0.6);
+  vg.addColorStop(0, '#070A24'); vg.addColorStop(1, '#02030C');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+
+  const fw = W * FOCUS, L = (W - fw) / 2, R = L + fw, cy = H / 2;
+  const cell = CELL * dpr;
+  curves = [];
+
+  const path = new Path2D();
+  for (const side of [-1, 1]) {
+    const inner = side < 0 ? L : R, outer = side < 0 ? 0 : W;
+    const control = inner + (outer - inner) * 0.53;
+    for (let y = -H / 3; y <= H * 4 / 3; y += cell) {
+      const p0 = { x: inner, y }, p1 = { x: control, y }, p2 = { x: outer, y: cy + (y - cy) * SQUEEZE };
+      path.moveTo(p0.x, p0.y); path.quadraticCurveTo(p1.x, p1.y, p2.x, p2.y);
+      curves.push([p0, p1, p2]);
+    }
+    for (let k = 1; k < 15; k++) {
+      const u = k / 15, t = 1 - (1 - u) * (1 - u);
+      const top = quad({ x: inner, y: -H / 3 }, { x: control, y: -H / 3 }, { x: outer, y: cy + (-H / 3 - cy) * SQUEEZE }, t);
+      const bot = quad({ x: inner, y: H * 4 / 3 }, { x: control, y: H * 4 / 3 }, { x: outer, y: cy + (H * 4 / 3 - cy) * SQUEEZE }, t);
+      path.moveTo(top.x, top.y); path.lineTo(bot.x, bot.y);
+    }
+  }
+  for (let x = L; x <= R + 0.5; x += cell) { path.moveTo(x, 0); path.lineTo(x, H); }
+  for (let y = 0; y <= H; y += cell) { path.moveTo(L, y); path.lineTo(R, y); }
+
+  g.lineWidth = 5 * dpr; g.strokeStyle = 'rgba(53,80,255,.28)';
+  g.filter = `blur(${4 * dpr}px)`; g.stroke(path);
+  g.filter = 'none';
+  g.lineWidth = 1.4 * dpr; g.strokeStyle = 'rgba(90,116,255,.9)'; g.stroke(path);
+}
+
+const sparks = Array.from({ length: SPARKS }, () => ({ c: 0, t: Math.random(), v: 0.0015 + Math.random() * 0.002 }));
+function respawn(s) { s.c = Math.floor(Math.random() * curves.length); s.t = 0; s.v = 0.0015 + Math.random() * 0.002; }
+
+let last = 0;
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (now - last < 33) return; // ~30 fps keeps it light on the GPU
+  last = now;
+  ctx.drawImage(base, 0, 0);
+  for (const s of sparks) {
+    if (!curves[s.c] || s.t >= 1) respawn(s);
+    s.t += s.v;
+    const [p0, p1, p2] = curves[s.c];
+    const p = quad(p0, p1, p2, s.t);
+    const r = 26 * (1 - s.t * 0.7) * (window.devicePixelRatio || 1);
+    const grd = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, r);
+    grd.addColorStop(0, 'rgba(200,212,255,.9)'); grd.addColorStop(1, 'rgba(90,116,255,0)');
+    ctx.fillStyle = grd; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
+  }
+}
+
+window.addEventListener('resize', build);
+build();
+sparks.forEach(respawn);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
