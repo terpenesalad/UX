@@ -563,8 +563,8 @@ internal sealed class Dock : Form
         if (item.Open != null)
         {
             // Our own apps. (A pinned File Explorer's windows still come back to focus if they're away.)
-            var away = item.Windows.FirstOrDefault(w => _zones.IsTracked(w));
-            if (away != IntPtr.Zero) _zones.BringToFocus(away);
+            var parked = item.Windows.FirstOrDefault(w => _zones.IsTracked(w));
+            if (parked != IntPtr.Zero) _zones.BringToFocus(parked);
             else item.Open();
             return;
         }
