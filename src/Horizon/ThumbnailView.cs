@@ -85,7 +85,7 @@ internal class ThumbnailView : Form
     public void Place(Rectangle bounds, byte opacity = 255, bool topmost = true)
     {
         _opacity = opacity;
-        Native.SetWindowPos(Handle, topmost ? Native.HWND_TOPMOST : Native.HWND_TOP,
+        Native.SetWindowPos(Handle, topmost ? Native.HWND_TOPMOST : Native.HWND_NOTOPMOST,
             bounds.X, bounds.Y, bounds.Width, bounds.Height, Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
         UpdateThumbnail();
     }
@@ -178,6 +178,31 @@ internal static class Glide
             done?.Invoke();
         };
         reveal.Start();
+    }
+
+    /// <summary>Moves a live view from one place/size to another, then calls <paramref name="done"/>.</summary>
+    public static void Animate(ThumbnailView view, Rectangle from, Rectangle to, HorizonConfig cfg, Action done)
+    {
+        if (!cfg.AnimateMoves || view.IsDisposed)
+        {
+            if (!view.IsDisposed) view.Place(to);
+            done();
+            return;
+        }
+
+        var started = Environment.TickCount64;
+        var timer = new System.Windows.Forms.Timer { Interval = 15 };
+        timer.Tick += (_, _) =>
+        {
+            double t = Math.Min(1, (Environment.TickCount64 - started) / (double)DurationMs);
+            if (!view.IsDisposed) view.Place(Lerp(from, to, Depth.EaseOutCubic(t)));
+            if (t < 1 && !view.IsDisposed) return;
+
+            timer.Stop();
+            timer.Dispose();
+            done();
+        };
+        timer.Start();
     }
 
     public static Rectangle Lerp(Rectangle a, Rectangle b, double t) => new(

@@ -261,6 +261,7 @@ internal sealed class DragController : IDisposable
         _scale += (target - _scale) * 0.25;
         _viewRect = Depth.ScaledAround(_full, _scale, cursor, _grab);
         _view.Place(_viewRect, atEdge ? (byte)170 : (byte)255);
+        _zones.ReportDrag(_viewRect);
         Moved?.Invoke(cursor);
     }
 
@@ -301,6 +302,7 @@ internal sealed class DragController : IDisposable
         var view = _view;
         _view = null;
         Ended?.Invoke();
+        _zones.ReportDrag(null, dropped: true);
         Glide.Land(_target, _before, activate: false, view);
     }
 

@@ -32,6 +32,21 @@ internal sealed class TrayApp : ApplicationContext
 
     private readonly System.Windows.Forms.Timer _systemDragTimer = new() { Interval = 30 };
     private readonly System.Windows.Forms.Timer _pruneTimer = new() { Interval = 1500 };
+    private readonly System.Windows.Forms.Timer _taskbarTimer = new() { Interval = 400 };
+
+    // Windows coming to the front / appearing (Alt+Tab to a parked window, new windows to theme).
+    private readonly Native.WinEventDelegate _shellEventProc;
+    private readonly IntPtr _foregroundHook;
+    private readonly IntPtr _showHook;
+
+    private static readonly HashSet<string> SwitcherClasses = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "XamlExplorerHostIslandWindow", "MultitaskingViewFrame", "TaskSwitcherWnd", "Windows.UI.Core.CoreWindow", "ForegroundStaging"
+    };
+
+    private string _lastForegroundClass = "";
+    private readonly WindowTheme _theme;
+    private LiveGrid? _grid;
     private readonly List<ZoneOverlay> _overlays = new();
 
     public TrayApp()
@@ -74,6 +89,9 @@ internal sealed class TrayApp : ApplicationContext
         };
         _tray.DoubleClick += (_, _) => FlashZones();
 
+        // ── Look: dark mode + minimal window chrome ──
+        _theme = new WindowTheme(_cfg);
+
         // ── Fluid drag ──
         _drag = new DragController(_zones) { Enabled = _cfg.FluidDrag };
         _drag.Started += () => { if (_cfg.ShowZonesWhileDragging) ShowOverlays(); };
@@ -85,10 +103,23 @@ internal sealed class TrayApp : ApplicationContext
             IntPtr.Zero, _winEventProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
         _systemDragTimer.Tick += (_, _) => SampleSystemDrag();
 
+        _shellEventProc = OnShellEvent;
+        _foregroundHook = Native.SetWinEventHook(Native.EVENT_SYSTEM_FOREGROUND, Native.EVENT_SYSTEM_FOREGROUND,
+            IntPtr.Zero, _shellEventProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+        _showHook = Native.SetWinEventHook(Native.EVENT_OBJECT_SHOW, Native.EVENT_OBJECT_SHOW,
+            IntPtr.Zero, _shellEventProc, 0, 0, Native.WINEVENT_OUTOFCONTEXT | Native.WINEVENT_SKIPOWNPROCESS);
+
         // ── Dock + taskbar ──
         if (_cfg.ShowDock)
         {
-            if (_cfg.AutoHideTaskbar) Taskbar.AutoHide();
+            if (_cfg.AutoHideTaskbar)
+            {
+                Taskbar.AutoHide();
+                Taskbar.KeepHidden();
+                _taskbarTimer.Tick += (_, _) => Taskbar.KeepHidden(); // Windows sometimes brings it back
+                _taskbarTimer.Start();
+            }
+
             _dock = new Dock(_zones, _cfg);
             _dock.Show();
             _zones.BottomReserve = _dock.PillHeight + 16;
@@ -100,6 +131,14 @@ internal sealed class TrayApp : ApplicationContext
 
         // ── Wallpaper (after the taskbar change has settled, so the zones line up) ──
         Delay(1200, ApplyWallpaper);
+
+        // ── Living grid (glows under moving windows, windows snap to it) ──
+        Delay(2500, () =>
+        {
+            _grid = new LiveGrid(_cfg);
+            _zones.Snap = r => _grid?.Snap(r) ?? r;
+            _zones.DragFeedback += (r, dropped) => _grid?.Feedback(r, dropped);
+        });
         SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         SystemEvents.SessionEnding += OnSessionEnding; // put the taskbar/wallpaper back on sign-out too
 
@@ -114,8 +153,8 @@ internal sealed class TrayApp : ApplicationContext
         var failed = RegisterHotkeys();
         _hotkeys.HotkeyPressed += OnHotkey;
 
-        string tip = "Drag a window by its title bar toward the sides — it drifts back and shrinks. " +
-                     "Push it to the very edge to stash it.";
+        string tip = "Drag a window by its title bar toward the sides — it shrinks into the distance. " +
+                     "Push it to the very edge to stash it. Click a far-off window to bring it back.";
         if (failed.Count > 0) tip += $"\nShortcuts in use by another app: {string.Join(", ", failed)}.";
         _tray.ShowBalloonTip(6000, "KAMI UX is running", tip, ToolTipIcon.None);
     }
@@ -132,7 +171,31 @@ internal sealed class TrayApp : ApplicationContext
     {
         ApplyWallpaper();
         _dock?.UpdateConfig(_cfg);
+        _grid?.Rebuild(_cfg);
     });
+
+    private void OnShellEvent(IntPtr hook, uint eventType, IntPtr hwnd, int idObject, int idChild, uint thread, uint time)
+    {
+        if (idObject != Native.OBJID_WINDOW || hwnd == IntPtr.Zero) return;
+        try
+        {
+            if (Native.GetAncestor(hwnd, Native.GA_ROOT) != hwnd) return;
+            if (eventType == Native.EVENT_SYSTEM_FOREGROUND)
+            {
+                // Only pull a parked window in when *you* switched to it (Alt+Tab / Task View),
+                // not when Windows activates it on its own after another window closes.
+                string cls = Win.ClassName(hwnd);
+                if (SwitcherClasses.Contains(_lastForegroundClass)) _zones.OnForegroundChanged(hwnd);
+                _lastForegroundClass = cls;
+            }
+
+            _theme.OnWindowShown(hwnd);
+        }
+        catch (Exception ex)
+        {
+            Log.Write("Window event failed: " + ex.Message);
+        }
+    }
 
     private void OnSessionEnding(object? sender, SessionEndingEventArgs e) => ExitThread();
 
@@ -327,6 +390,8 @@ internal sealed class TrayApp : ApplicationContext
         _zones.UpdateConfig(_cfg);
         _drag.Enabled = _cfg.FluidDrag;
         _dock?.UpdateConfig(_cfg);
+        _theme.UpdateConfig(_cfg);
+        _grid?.Rebuild(_cfg);
         ApplyWallpaper();
         _tray.ShowBalloonTip(2000, "KAMI UX", "Settings reloaded. (Turning the dock on or off needs a restart.)", ToolTipIcon.None);
     }
@@ -337,6 +402,9 @@ internal sealed class TrayApp : ApplicationContext
         SystemEvents.SessionEnding -= OnSessionEnding;
         _pruneTimer.Stop();
         _systemDragTimer.Stop();
+        _taskbarTimer.Stop();
+        _grid?.Dispose();
+        _theme.Dispose();
         HideOverlays();
         _drag.Dispose();
         _cinema.CloseAll();
@@ -349,6 +417,8 @@ internal sealed class TrayApp : ApplicationContext
         Taskbar.Restore();
 
         if (_winEventHook != IntPtr.Zero) Native.UnhookWinEvent(_winEventHook);
+        if (_foregroundHook != IntPtr.Zero) Native.UnhookWinEvent(_foregroundHook);
+        if (_showHook != IntPtr.Zero) Native.UnhookWinEvent(_showHook);
         for (int id = HkParkLeft; id <= HkArrange; id++) Native.UnregisterHotKey(_hotkeys.Handle, id);
         _hotkeys.DestroyHandle();
 

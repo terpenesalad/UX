@@ -32,6 +32,9 @@ internal sealed class TrackedWindow
 
     public required string ScreenName { get; set; }
 
+    /// <summary>While parked in the periphery: the live, scaled view standing in for the window.</summary>
+    public ParkedView? View { get; set; }
+
     public StashWidget? Widget { get; set; }
     public Side StashSide { get; set; }
     public Rectangle StashOuter { get; set; }
@@ -46,10 +49,11 @@ internal sealed class TrackedWindow
 
 /// <summary>
 /// Where windows go:
-///  • anywhere in the focus zone → full size;
-///  • in the periphery → smaller the further out it sits (see <see cref="Depth"/>), still live;
-///  • dropped at the very edge → stashed into a little widget;
-///  • click the widget / dock icon, or Win+Alt+↑ → glides back to full size in focus.
+///  • in the focus zone → the real window, full size;
+///  • in the periphery → a live, scaled-down view of the *whole* window (contents included),
+///    smaller the further out it sits (see <see cref="Depth"/>). The real window waits, full size,
+///    just off-screen; click the view (or the dock icon, or Alt+Tab to it) to bring it back;
+///  • dropped at the very edge → stashed into a little widget.
 /// </summary>
 internal sealed class ZoneManager
 {
@@ -61,6 +65,12 @@ internal sealed class ZoneManager
 
     /// <summary>Space kept free at the bottom of the screen for the dock.</summary>
     public int BottomReserve { get; set; }
+
+    /// <summary>Lines a rectangle up with the grid (set by the living grid). Screen coordinates.</summary>
+    public Func<Rectangle, Rectangle>? Snap { get; set; }
+
+    /// <summary>Where a window is being moved (null = nothing), and whether it was just dropped.</summary>
+    public event Action<Rectangle?, bool>? DragFeedback;
 
     public ZoneManager(HorizonConfig cfg) => _cfg = cfg;
 
@@ -89,10 +99,21 @@ internal sealed class ZoneManager
         return null;
     }
 
+    public void ReportDrag(Rectangle? rect, bool dropped = false) => DragFeedback?.Invoke(rect, dropped);
+
+    private bool InFocusZone(Point p)
+    {
+        var zones = ZoneLayout.For(Screen.FromPoint(p).WorkingArea, _cfg.FocusWidthRatio);
+        return p.X >= zones.Focus.Left && p.X <= zones.Focus.Right;
+    }
+
+    private Rectangle Snapped(Rectangle r, Screen screen) =>
+        Depth.Clamp(Snap?.Invoke(r) ?? r, screen.WorkingArea);
+
     // ── Results of a drag ────────────────────────────────────────────────────
 
     /// <summary>
-    /// Called when a fluid drag ends. The real window is off-screen and <paramref name="view"/>
+    /// A title-bar drag ended. The real window is off-screen and <paramref name="view"/>
     /// (its live preview) sits at <paramref name="viewRect"/>.
     /// </summary>
     public void CompleteDrag(IntPtr hwnd, Point cursor, Rectangle viewRect, Size fullSize, Rectangle before, ThumbnailView view)
@@ -102,14 +123,59 @@ internal sealed class ZoneManager
 
         if (StashEdgeAt(cursor) is Side side)
         {
+            ReportDrag(null, dropped: true);
             Stash(t, side, screen, view, viewRect);
             return;
         }
 
-        CloseWidget(t);
-        var target = Depth.Clamp(viewRect, screen.WorkingArea);
-        Glide.Land(hwnd, target, activate: true, view);
-        ForgetIfFullSize(t, target);
+        if (InFocusZone(cursor))
+        {
+            var target = Snapped(FullSizeAround(t.FullSize, viewRect, cursor), screen);
+            ReportDrag(target, dropped: true);
+            _tracked.Remove(hwnd);
+            CloseWidget(t);
+            Glide.Land(hwnd, target, activate: true, view);
+            return;
+        }
+
+        var parked = Snapped(viewRect, screen);
+        ReportDrag(parked, dropped: true);
+        ParkInto(t, viewRect, parked, view);
+    }
+
+    /// <summary>A parked view was dragged and let go.</summary>
+    public void CompleteViewDrag(ParkedView view, Point cursor, Rectangle rect)
+    {
+        if (!_tracked.TryGetValue(view.Source, out var t) || t.View != view)
+        {
+            view.Close();
+            return;
+        }
+
+        var screen = Screen.FromPoint(cursor);
+        t.ScreenName = screen.DeviceName;
+
+        if (StashEdgeAt(cursor) is Side side)
+        {
+            ReportDrag(null, dropped: true);
+            t.View = null;
+            Stash(t, side, screen, view, rect);
+            return;
+        }
+
+        if (InFocusZone(cursor))
+        {
+            var target = Snapped(FullSizeAround(t.FullSize, rect, cursor), screen);
+            ReportDrag(target, dropped: true);
+            t.View = null;
+            _tracked.Remove(t.Hwnd);
+            Glide.Animate(view, rect, target, _cfg, () => Glide.Land(t.Hwnd, target, activate: true, view));
+            return;
+        }
+
+        var parked = Snapped(rect, screen);
+        ReportDrag(parked, dropped: true);
+        view.Place(parked, topmost: false);
     }
 
     /// <summary>For drags Windows handled itself (e.g. maximised windows, keyboard moves).</summary>
@@ -118,24 +184,79 @@ internal sealed class ZoneManager
         if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
 
         var screen = Screen.FromPoint(cursor);
-        var t = Track(hwnd, screen, FullSizeOf(hwnd), before);
+        var now = Win.GetVisibleBounds(hwnd);
+        var t = Track(hwnd, screen, now.Size, before);
+        t.FullSize = now.Size;
 
         if (StashEdgeAt(cursor) is Side side)
         {
-            Stash(t, side, screen, null, Win.GetVisibleBounds(hwnd));
+            Stash(t, side, screen, null, now);
             return;
         }
 
-        var now = Win.GetVisibleBounds(hwnd);
-        var anchor = new Point(cursor.X, cursor.Y);
+        if (InFocusZone(cursor))
+        {
+            _tracked.Remove(hwnd);
+            var snapped = Snapped(now, screen);
+            if (snapped != now) Win.SetVisibleBounds(hwnd, snapped);
+            return;
+        }
+
         var fraction = new PointF(
             Math.Clamp((cursor.X - now.Left) / (float)Math.Max(1, now.Width), 0, 1),
             Math.Clamp((cursor.Y - now.Top) / (float)Math.Max(1, now.Height), 0, 1));
         double scale = Depth.Scale(cursor.X, screen.WorkingArea, _cfg);
-        var target = Depth.Clamp(Depth.ScaledAround(t.FullSize, scale, anchor, fraction), screen.WorkingArea);
+        var target = Snapped(Depth.ScaledAround(t.FullSize, scale, cursor, fraction), screen);
+        ParkInto(t, now, target, null);
+    }
 
-        Glide.Move(hwnd, target, activate: true, _cfg);
-        ForgetIfFullSize(t, target);
+    /// <summary>Full-size rectangle that keeps the same point of the window under the pointer.</summary>
+    private static Rectangle FullSizeAround(Size full, Rectangle shown, Point cursor)
+    {
+        var fraction = new PointF(
+            Math.Clamp((cursor.X - shown.Left) / (float)Math.Max(1, shown.Width), 0, 1),
+            Math.Clamp((cursor.Y - shown.Top) / (float)Math.Max(1, shown.Height), 0, 1));
+        return Depth.ScaledAround(full, 1.0, cursor, fraction);
+    }
+
+    /// <summary>
+    /// Parks a window in the periphery: a live scaled view appears at <paramref name="to"/> (gliding
+    /// from <paramref name="from"/>), and the real window waits full size just off-screen.
+    /// </summary>
+    private void ParkInto(TrackedWindow t, Rectangle from, Rectangle to, ThumbnailView? replacing)
+    {
+        CloseWidget(t);
+        var hwnd = t.Hwnd;
+
+        var view = t.View;
+        if (view == null || view.IsDisposed)
+        {
+            view = new ParkedView(hwnd, this) { Bounds = from };
+            t.View = view;
+            view.Show();
+            view.Place(from, topmost: true);
+        }
+
+        if (Screen.AllScreens.Any(s => s.Bounds.IntersectsWith(Win.GetVisibleBounds(hwnd))))
+            Win.MoveOffscreen(hwnd);
+
+        if (replacing != null && replacing != view)
+        {
+            // Let the new view paint before the drag preview disappears.
+            var swap = new System.Windows.Forms.Timer { Interval = 60 };
+            swap.Tick += (_, _) =>
+            {
+                swap.Stop();
+                swap.Dispose();
+                replacing.Close();
+                replacing.Dispose();
+            };
+            swap.Start();
+        }
+
+        var parked = view;
+        if (from == to) parked.Place(to, topmost: false);
+        else Glide.Animate(parked, from, to, _cfg, () => { if (!parked.IsDisposed) parked.Place(to, topmost: false); });
     }
 
     // ── Shortcuts ────────────────────────────────────────────────────────────
@@ -144,6 +265,7 @@ internal sealed class ZoneManager
     {
         var hwnd = Native.GetForegroundWindow();
         if (Paused || !Win.IsManageable(hwnd, _cfg)) return;
+        if (Native.IsZoomed(hwnd)) Native.ShowWindow(hwnd, Native.SW_RESTORE);
 
         var screen = Screen.FromHandle(hwnd);
         var wa = screen.WorkingArea;
@@ -151,11 +273,11 @@ internal sealed class ZoneManager
         var column = side == Side.Left ? zones.Left : zones.Right;
 
         var now = Win.GetVisibleBounds(hwnd);
-        var t = Track(hwnd, screen, FullSizeOf(hwnd), now);
+        var t = Track(hwnd, screen, now.Size, now);
         int cx = column.Left + column.Width / 2;
         double scale = Depth.Scale(cx, wa, _cfg);
-        var target = Depth.ScaledAround(t.FullSize, scale, new Point(cx, now.Top + now.Height / 2), new PointF(0.5f, 0.5f));
-        Glide.Move(hwnd, Depth.Clamp(target, wa), activate: false, _cfg);
+        var target = Snapped(Depth.ScaledAround(t.FullSize, scale, new Point(cx, now.Top + now.Height / 2), new PointF(0.5f, 0.5f)), screen);
+        ParkInto(t, now, target, null);
     }
 
     public void StashForeground(Side side)
@@ -171,6 +293,12 @@ internal sealed class ZoneManager
     }
 
     public void FocusForeground() => BringToFocus(Native.GetForegroundWindow());
+
+    /// <summary>Something (Alt+Tab, a notification, the app itself) activated a parked window: bring it in.</summary>
+    public void OnForegroundChanged(IntPtr hwnd)
+    {
+        if (_tracked.TryGetValue(hwnd, out var t) && t.View != null) BringToFocus(hwnd);
+    }
 
     // ── Focus / stash ────────────────────────────────────────────────────────
 
@@ -188,6 +316,15 @@ internal sealed class ZoneManager
             CloseWidget(t);
             LayoutWidgets();
             Unstash(t, FocusRect(screen, full, null));
+            return;
+        }
+
+        if (t?.View is { IsDisposed: false } view)
+        {
+            t.View = null;
+            var from = view.Bounds;
+            var to = FocusRect(screen, full, from.Top + from.Height / 2);
+            Glide.Animate(view, from, to, _cfg, () => Glide.Land(hwnd, to, activate: true, view));
             return;
         }
 
@@ -222,6 +359,8 @@ internal sealed class ZoneManager
         var hwnd = t.Hwnd;
         t.StashSide = side;
         t.ScreenName = screen.DeviceName;
+        if (t.View != null && t.View != view) CloseView(t);
+        t.View = null;
 
         if (t.Widget == null)
         {
@@ -356,18 +495,13 @@ internal sealed class ZoneManager
         return t;
     }
 
-    private void ForgetIfFullSize(TrackedWindow t, Rectangle placed)
-    {
-        if (t.IsStashed) return;
-        if (placed.Width >= t.FullSize.Width * 0.97) _tracked.Remove(t.Hwnd);
-    }
-
     /// <summary>Puts every shrunk or stashed window back exactly where it started.</summary>
     public void RestoreAll()
     {
         foreach (var t in _tracked.Values.ToList())
         {
             CloseWidget(t);
+            CloseView(t);
             if (!Native.IsWindow(t.Hwnd)) continue;
             Win.SetVisibleBounds(t.Hwnd, t.Original);
         }
@@ -386,7 +520,18 @@ internal sealed class ZoneManager
             bool restoredByUser = t.IsStashed && t.Tucked && !gone &&
                                   !Native.IsIconic(t.Hwnd) && Native.IsWindowVisible(t.Hwnd);
             bool maximised = !t.IsStashed && !gone && Native.IsZoomed(t.Hwnd);
-            if (!gone && !restoredByUser && !maximised) continue;
+            bool viewLost = t.View is { IsDisposed: true } && !t.IsStashed && !gone;
+            if (viewLost)
+            {
+                t.View = null;
+                Win.SetVisibleBounds(t.Hwnd, FocusRect(FindScreen(t.ScreenName) ?? Screen.PrimaryScreen!, t.FullSize, null));
+                _tracked.Remove(t.Hwnd);
+                continue;
+            }
+
+            bool backOnScreen = t.View != null && !gone &&
+                                Screen.AllScreens.Any(s => s.Bounds.IntersectsWith(Win.GetVisibleBounds(t.Hwnd)));
+            if (!gone && !restoredByUser && !maximised && !backOnScreen) continue;
 
             // Restored by hand somewhere unreachable? Bring it into focus instead.
             if (restoredByUser &&
@@ -398,6 +543,7 @@ internal sealed class ZoneManager
             _tracked.Remove(t.Hwnd);
             if (t.IsStashed) changed = true;
             CloseWidget(t);
+            CloseView(t);
         }
 
         if (changed) LayoutWidgets();
@@ -425,6 +571,18 @@ internal sealed class ZoneManager
                 y += widget.Height + gap;
             }
         }
+    }
+
+    private static void CloseView(TrackedWindow t)
+    {
+        if (t.View == null) return;
+        if (!t.View.IsDisposed)
+        {
+            t.View.Close();
+            t.View.Dispose();
+        }
+
+        t.View = null;
     }
 
     private static void CloseWidget(TrackedWindow t)

@@ -571,9 +571,37 @@ internal sealed class Dock : Form
     }
 }
 
-/// <summary>Turns Windows' own taskbar auto-hide on while the dock is up, and back off afterwards.</summary>
+/// <summary>
+/// Keeps the Windows taskbar out of the way while the dock is up: auto-hide (so windows get the
+/// full screen) *and* hidden outright, so it can't pop up when the mouse touches the bottom edge.
+/// Everything is put back on quit.
+/// </summary>
 internal static class Taskbar
 {
+    /// <summary>Hides every taskbar (main and other monitors). Safe to call repeatedly.</summary>
+    public static void KeepHidden()
+    {
+        foreach (var bar in AllBars())
+            if (Native.IsWindowVisible(bar)) Native.ShowWindow(bar, Native.SW_HIDE);
+    }
+
+    public static void ShowAll()
+    {
+        foreach (var bar in AllBars()) Native.ShowWindow(bar, Native.SW_SHOWNOACTIVATE);
+    }
+
+    private static List<IntPtr> AllBars()
+    {
+        var bars = new List<IntPtr>();
+        Native.EnumWindows((h, _) =>
+        {
+            string cls = Win.ClassName(h);
+            if (cls is "Shell_TrayWnd" or "Shell_SecondaryTrayWnd") bars.Add(h);
+            return true;
+        }, IntPtr.Zero);
+        return bars;
+    }
+
     private static string BackupPath => Path.Combine(HorizonConfig.Folder, "taskbar-backup.txt");
 
     public static void AutoHide()
@@ -592,6 +620,7 @@ internal static class Taskbar
 
     public static void Restore()
     {
+        ShowAll();
         try
         {
             if (!File.Exists(BackupPath)) return;

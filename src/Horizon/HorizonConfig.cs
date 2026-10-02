@@ -45,8 +45,21 @@ internal sealed class HorizonConfig
     /// <summary>Show the Horizon dock (built from your pinned taskbar apps).</summary>
     public bool ShowDock { get; set; } = true;
 
-    /// <summary>Auto-hide the Windows taskbar while the dock is showing (restored on exit).</summary>
+    /// <summary>Hide the Windows taskbar completely while KAMI UX runs (restored on exit).</summary>
     public bool AutoHideTaskbar { get; set; } = true;
+
+    /// <summary>The grid behind your windows glows where you move them (otherwise it's a still wallpaper).</summary>
+    public bool LiveGrid { get; set; } = true;
+
+    /// <summary>Window edges click onto nearby grid lines when you let go.</summary>
+    public bool SnapToGrid { get; set; } = true;
+    public int SnapDistance { get; set; } = 14;
+
+    /// <summary>Switch Windows (Explorer, Settings, apps that follow it) to dark mode while KAMI UX runs.</summary>
+    public bool DarkMode { get; set; } = true;
+
+    /// <summary>Give every window the same minimal dark title bar, with no coloured border.</summary>
+    public bool MinimalWindowChrome { get; set; } = true;
 
     /// <summary>Dock icon size at rest, and when magnified under the pointer.</summary>
     public int DockIconSize { get; set; } = 52;
@@ -112,6 +125,7 @@ internal sealed class HorizonConfig
         Margin = Math.Clamp(Margin, 0, 100);
         DockIconSize = Math.Clamp(DockIconSize, 32, 96);
         DockMagnifiedSize = Math.Clamp(DockMagnifiedSize, DockIconSize, 160);
+        SnapDistance = Math.Clamp(SnapDistance, 0, 60);
         return this;
     }
 }

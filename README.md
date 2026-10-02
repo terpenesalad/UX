@@ -14,10 +14,11 @@ KAMI UX turns a wide monitor (or a projected PC screen) into a depth-aware deskt
  ▲ stash edge                                       stash edge ▲
 ```
 
-- **Depth drag:** grab any window by its title bar and pull it toward a side. It drifts back and shrinks smoothly, as if being pushed further away. Let go and it stays there, live and usable. Pull it back to the middle and it grows to full size again.
+- **Depth drag:** grab any window by its title bar and pull it toward a side. The *whole* window shrinks smoothly, contents and all, as if it's being pushed further away. Let go and it stays there as a live miniature (videos keep playing). Click it, pick it in the dock, or Alt+Tab to it and it glides back to full size; drag it into the middle and it grows as it comes.
 - **Stash:** push a window all the way to the screen edge and it tucks into a small widget showing its icon. Music apps get a play/pause button. Click the widget to bring the window back.
-- **Grid wallpaper:** KAMI UX draws a dark grid for each monitor at its exact resolution and sets it as your wallpaper. The flat part sits behind the focus zone and the curves sit behind the peripheries, so the background is your guide. Your old wallpaper comes back when KAMI UX quits.
-- **Dock:** your pinned taskbar apps, in the same order, plus anything else running, in a dock that magnifies under the pointer. A dot means the app is running. Click to open or switch, shift- or middle-click for a new window. Clicking an app that's parked or stashed brings it back to focus. The Windows taskbar auto-hides while the dock is up.
+- **Living grid:** a dark grid sits behind your desktop icons. The flat part is behind the focus zone and the curves are behind the sides. As you move a window, the grid lines around it light up and trail off behind it. Window edges that land on a line glow brightest, snap onto it, and pulse when you let go. Your old wallpaper comes back when KAMI UX quits.
+- **Your own OS look:** while KAMI UX runs, Windows switches to dark mode (Explorer, Settings, Start, and apps that follow the system), and every window gets the same minimal near-black title bar with no coloured border. Everything goes back to how it was when you quit.
+- **Dock:** your pinned taskbar apps, in the same order, plus anything else running, in a dock that magnifies under the pointer. A dot means the app is running. Click to open or switch, shift- or middle-click for a new window. Clicking an app that's parked or stashed brings it back to focus. The Windows taskbar is hidden completely while the dock is up, so it can't pop up when your mouse touches the bottom edge.
 - **Video screens:** press `Win + Alt + V` and draw a box around a video in any window (browser, VLC, a video call). It becomes its own borderless screen. You can resize it, scroll to zoom, or double-click to go big, and you can run several at once. `Win + Alt + A` arranges them all in a neat grid.
 
 It's based on the ultra-wide prototypes in Scott Jenson's talk *"Are we really going to use the same Desktop UX forever?"* (Akademy 2026).
@@ -44,8 +45,10 @@ It's based on the ultra-wide prototypes in Scott Jenson's talk *"Are we really g
 
 | Do this | What happens |
 |---|---|
-| Drag a window by its title bar toward a side | It drifts back and shrinks, and stays where you drop it |
-| Drag it back into the middle | It grows back to full size |
+| Drag a window by its title bar toward a side | The whole window shrinks into the distance and stays there, live |
+| Click a far-off window (or its dock icon, or Alt+Tab to it) | It glides back to full size in the middle |
+| Drag a far-off window around | It grows toward the middle and shrinks toward the edge |
+| Right-click a far-off window | Bring to focus / close it |
 | Push it to the very left/right edge | It's stashed into a small widget |
 | Click a stash widget | The window flies back to focus |
 | Right-click or `Esc` while dragging | Cancels; the window goes back where it was |
@@ -79,8 +82,12 @@ Tray icon → **Open settings file** opens `%APPDATA%\KAMI UX\config.json`. Edit
 | `StashEdgePixels` | `28` | How close to the edge counts as "stash" |
 | `FluidDrag` | `true` | KAMI UX handles title-bar drags (turn off to get Windows' normal dragging back) |
 | `AnimateMoves` | `true` | Glide windows into place for shortcuts, dock and widgets |
-| `SetWallpaper` / `RestoreWallpaperOnExit` | `true` / `true` | The generated grid wallpaper |
-| `ShowDock` / `AutoHideTaskbar` | `true` / `true` | The dock, and hiding the Windows taskbar while it's up (restored on quit) |
+| `SetWallpaper` / `RestoreWallpaperOnExit` | `true` / `true` | The grid wallpaper |
+| `LiveGrid` | `true` | Grid lines glow around windows you move (off = still wallpaper) |
+| `SnapToGrid` / `SnapDistance` | `true` / `14` | Window edges click onto grid lines within this many pixels |
+| `DarkMode` | `true` | Windows dark mode while KAMI UX runs |
+| `MinimalWindowChrome` | `true` | The same minimal dark title bar on every window |
+| `ShowDock` / `AutoHideTaskbar` | `true` / `true` | The dock, and hiding the Windows taskbar completely while it's up (restored on quit) |
 | `DockIconSize` / `DockMagnifiedSize` | `52` / `84` | Dock icon size at rest and under the pointer |
 | `KeepVideoSourcesAwake` | `true` | Stops browsers pausing the video behind a video screen. Turn off if a screen ever shows blank |
 | `ShowZonesWhileDragging` | `false` | An extra zone overlay while dragging (the wallpaper already shows the zones) |
@@ -97,8 +104,12 @@ KAMI UX sets the grid wallpaper itself. The `wallpaper` folder also has the same
 ## Known limits
 
 - **Apps running as administrator** can't be moved by a normal app; that's a Windows security rule. Run KAMI UX as admin too if you need it.
-- **Some apps have a minimum size**, so in the far periphery they may not shrink as far as the preview did.
-- **During a drag you see a live preview** (for some apps, like browsers, a still frame); the real window lands when you let go.
+- **Far-off windows are for looking, not clicking into.** A click brings the window back to focus; you can't type into it while it's small.
+- **Browsers may pause while far off.** Chrome, Edge and Firefox stop drawing windows they think are hidden, so a far-off browser can show a still frame. To keep them live, turn off their occlusion tracking:
+  - **Chrome / Edge:** add `--disable-features=CalculateNativeWinOcclusion` to the shortcut.
+  - **Firefox:** in `about:config`, set `widget.windows.window_occlusion_tracking.enabled` to `false`.
+  Or use a video screen (`Win+Alt+V`), which keeps playing without this.
+- **Explorer's layout stays Explorer's.** KAMI UX makes it dark and minimal, but it can't redesign Explorer's insides.
 - **Maximised windows** use Windows' normal drag. KAMI UX still sizes them by depth when you drop them.
 - **Video screens copy pixels from the source window,** so make the source window large for the sharpest picture.
 
@@ -110,6 +121,9 @@ KAMI UX sets the grid wallpaper itself. The `wallpaper` folder also has the same
 | `Depth.cs` | The "pushed further away" maths: size as a function of horizontal position |
 | `ThumbnailView.cs` | Live DWM previews, used for dragging, gliding and video screens |
 | `ZoneManager.cs` | Where windows land, stashing, bringing back to focus |
+| `ParkedView.cs` | The live miniature that stands in for a far-off window |
+| `GridGeometry.cs` / `LiveGrid.cs` | The grid's lines (shared by wallpaper, glow and snapping) and the glowing grid behind the icons |
+| `WindowTheme.cs` | Dark mode and the minimal title bars |
 | `Dock.cs` | The dock (pinned taskbar shortcuts + running apps) and taskbar auto-hide |
 | `Cinema.cs` | Video screens and the area picker |
 | `WallpaperManager.cs` | Draws and sets the per-monitor grid wallpaper |

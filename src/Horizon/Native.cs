@@ -82,6 +82,7 @@ internal static class Native
     public const uint SWP_SHOWWINDOW = 0x0040;
     public static readonly IntPtr HWND_TOPMOST = new(-1);
     public static readonly IntPtr HWND_TOP = IntPtr.Zero;
+    public static readonly IntPtr HWND_NOTOPMOST = new(-2);
 
     public const int SW_HIDE = 0;
     public const int SW_SHOWNORMAL = 1;
@@ -167,6 +168,9 @@ internal static class Native
     [DllImport("user32.dll")]
     public static extern bool GetWindowRect(IntPtr hWnd, out RECT lpRect);
 
+    [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+    public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
     [DllImport("user32.dll")]
     public static extern bool GetCursorPos(out POINT lpPoint);
 
@@ -236,6 +240,26 @@ internal static class Native
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern IntPtr FindWindow(string lpClassName, string? lpWindowName);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    public static extern IntPtr FindWindowEx(IntPtr hwndParent, IntPtr hwndChildAfter, string? lpszClass, string? lpszWindow);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern IntPtr SetParent(IntPtr hWndChild, IntPtr hWndNewParent);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW")]
+    public static extern IntPtr SendMessageTimeoutString(IntPtr hWnd, uint msg, IntPtr wParam, string lParam,
+        uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
+
+    public static readonly IntPtr HWND_BROADCAST = new(0xFFFF);
+    public static readonly IntPtr HWND_BOTTOM = new(1);
+    public const uint WM_SETTINGCHANGE = 0x001A;
+    public const uint SMTO_NORMAL = 0x0000;
+
+    public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
+    public const uint EVENT_OBJECT_SHOW = 0x8002;
+    public const int WS_CHILD = 0x40000000;
+    public const int WS_POPUP = unchecked((int)0x80000000);
+
     [DllImport("user32.dll", SetLastError = true)]
     public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, IntPtr wParam, IntPtr lParam,
         uint fuFlags, uint uTimeout, out IntPtr lpdwResult);
@@ -268,6 +292,14 @@ internal static class Native
     public const int DWMWA_CLOAKED = 14;
     public const int DWMWA_WINDOW_CORNER_PREFERENCE = 33;
     public const int DWMWCP_ROUND = 2;
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE_OLD = 19;
+    public const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    public const int DWMWA_BORDER_COLOR = 34;
+    public const int DWMWA_CAPTION_COLOR = 35;
+    public const int DWMWA_TEXT_COLOR = 36;
+    public const int DWMWA_SYSTEMBACKDROP_TYPE = 38;
+    public const int DWMWA_COLOR_DEFAULT = unchecked((int)0xFFFFFFFF);
+    public const int DWMWA_COLOR_NONE = unchecked((int)0xFFFFFFFE);
 
     public const int DWM_TNP_RECTDESTINATION = 0x01;
     public const int DWM_TNP_RECTSOURCE = 0x02;

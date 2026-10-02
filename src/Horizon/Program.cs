@@ -14,7 +14,11 @@ internal static class Program
 
         ApplicationConfiguration.Initialize();
         Application.ThreadException += (_, e) => Log.Write("UI error: " + e.Exception);
-        AppDomain.CurrentDomain.UnhandledException += (_, e) => Log.Write("Fatal: " + e.ExceptionObject);
+        AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+        {
+            Log.Write("Fatal: " + e.ExceptionObject);
+            try { Taskbar.ShowAll(); } catch { /* best effort: never leave the taskbar hidden */ }
+        };
 
         Application.Run(new TrayApp());
     }
